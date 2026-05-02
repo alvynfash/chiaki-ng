@@ -89,6 +89,29 @@ typedef struct chiaki_connect_info_t
 	uint8_t psn_account_id[CHIAKI_PSN_ACCOUNT_ID_SIZE];
 	double packet_loss_max;
 	bool enable_idr_on_fec_failure;
+	/**
+	 * Cloud-direct mode: skip the TCP RP session request and control channel.
+	 * The `morning` key is used as the Takion handshake key directly.
+	 * Intended for Gaikai/PlayStation Cloud servers (protocol "tak-d") where the
+	 * HTTP session API has already been completed by an external orchestrator.
+	 */
+	bool cloud_direct;
+	/**
+	 * Non-standard UDP port for the Takion stream connection.
+	 * 0 means use the default (9296 for PS4, 9296 for cloud).
+	 * Set this to the port returned by the Gaikai /allocate response.
+	 */
+	uint16_t stream_port;
+	/**
+	 * Cloud-direct: Gaikai session ID (from /allocate sessionId field).
+	 * Used as the BIG message session_key.  NULL or empty = not set.
+	 */
+	const char *cloud_session_id;
+	/**
+	 * Cloud-direct: launchSpecification base64 string from Gaikai /allocate.
+	 * Sent verbatim as the BIG message launch_spec.  NULL = not set.
+	 */
+	const char *cloud_launch_spec_b64;
 } ChiakiConnectInfo;
 
 
@@ -227,6 +250,10 @@ typedef struct chiaki_session_t
 		bool enable_dualsense;
 		uint8_t psn_account_id[CHIAKI_PSN_ACCOUNT_ID_SIZE];
 		bool enable_idr_on_fec_failure;
+		bool cloud_direct;
+		uint16_t stream_port;
+		char cloud_session_id[128]; // zero-terminated; copied from ChiakiConnectInfo
+		char *cloud_launch_spec_b64; // heap-allocated copy; NULL if not set
 	} connect_info;
 
 	ChiakiTarget target;

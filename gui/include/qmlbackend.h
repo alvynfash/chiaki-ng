@@ -15,6 +15,8 @@
 #include <QFutureWatcher>
 #include <QFuture>
 #include <QAtomicInteger>
+#include <QLocalServer>
+#include <QLocalSocket>
 #ifdef CHIAKI_HAVE_WEBENGINE
 #include <QQuickWebEngineProfile>
 #include <QWebEngineUrlRequestInterceptor>
@@ -306,6 +308,9 @@ private:
 #endif
     bool controller_mapping_default_mapping = false;
     bool controller_mapping_altered = false;
+    QLocalServer *ctrl_server = {};
+    void startCtrlServer();
+    void handleCtrlConnection();
     bool updating_psn_hosts = false;
     QFutureWatcher<void> psn_hosts_watcher;
     QFuture<void> psn_hosts_future;

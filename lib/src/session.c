@@ -264,6 +264,16 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_session_init(ChiakiSession *session, Chiaki
 	session->connect_info.enable_keyboard = connect_info->enable_keyboard;
 	session->connect_info.enable_dualsense = connect_info->enable_dualsense;
 	session->connect_info.enable_idr_on_fec_failure = connect_info->enable_idr_on_fec_failure;
+	session->connect_info.cloud_direct = connect_info->cloud_direct;
+	session->connect_info.stream_port = connect_info->stream_port;
+	if(connect_info->cloud_session_id)
+		strncpy(session->connect_info.cloud_session_id, connect_info->cloud_session_id, sizeof(session->connect_info.cloud_session_id) - 1);
+	session->connect_info.cloud_launch_spec_b64 = connect_info->cloud_launch_spec_b64 ? strdup(connect_info->cloud_launch_spec_b64) : NULL;
+
+	// Cloud-direct: pre-select the first resolved address so stream_connection_run
+	// can use it without going through session_thread_request_session first.
+	if(connect_info->cloud_direct && session->connect_info.host_addrinfos)
+		session->connect_info.host_addrinfo_selected = session->connect_info.host_addrinfos;
 
 	return CHIAKI_ERR_SUCCESS;
 
@@ -300,6 +310,7 @@ CHIAKI_EXPORT void chiaki_session_fini(ChiakiSession *session)
 	chiaki_cond_fini(&session->state_cond);
 	chiaki_mutex_fini(&session->state_mutex);
 	freeaddrinfo(session->connect_info.host_addrinfos);
+	free(session->connect_info.cloud_launch_spec_b64);
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_session_start(ChiakiSession *session)
@@ -484,6 +495,52 @@ static void *session_thread_func(void *arg)
 		session->quit_reason = CHIAKI_QUIT_REASON_STOPPED;
 		QUIT(quit);
 	}
+
+	// ── Cloud-direct mode ────────────────────────────────────────────────────
+	// Skip the TCP RP session request, ctrl channel, and Senkusha entirely.
+	// The Gaikai HTTP session API has already been handled externally; we use
+	// `morning` (= handshakeKey from /allocate) directly as the Takion key.
+	if(session->connect_info.cloud_direct)
+	{
+		CHIAKI_LOGI(session->log, "Cloud-direct mode: skipping TCP session request, ctrl, and Senkusha");
+
+		// Use the morning key as the Takion handshake key directly
+		memcpy(session->handshake_key, session->connect_info.morning, CHIAKI_HANDSHAKE_KEY_SIZE);
+
+		// Fallback network parameters (no Senkusha measurement)
+		session->mtu_in = 1454;
+		session->mtu_out = 1454;
+		session->rtt_us = 16000;
+		session->dontfrag = false;
+
+		ChiakiErrorCode err = chiaki_ecdh_init(&session->ecdh);
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			CHIAKI_LOGE(session->log, "Cloud-direct: failed to initialize ECDH");
+			QUIT(quit);
+		}
+
+		chiaki_mutex_unlock(&session->state_mutex);
+		err = chiaki_stream_connection_run(&session->stream_connection, NULL);
+		chiaki_mutex_lock(&session->state_mutex);
+
+		if(err == CHIAKI_ERR_DISCONNECTED)
+		{
+			if(!strcmp(session->stream_connection.remote_disconnect_reason, "Server shutting down"))
+				session->quit_reason = CHIAKI_QUIT_REASON_STREAM_CONNECTION_REMOTE_SHUTDOWN;
+			else
+				session->quit_reason = CHIAKI_QUIT_REASON_STREAM_CONNECTION_REMOTE_DISCONNECTED;
+			session->quit_reason_str = strdup(session->stream_connection.remote_disconnect_reason);
+		}
+		else if(err != CHIAKI_ERR_SUCCESS && err != CHIAKI_ERR_CANCELED)
+		{
+			CHIAKI_LOGE(session->log, "Cloud-direct: StreamConnection run failed");
+			session->quit_reason = CHIAKI_QUIT_REASON_STREAM_CONNECTION_UNKNOWN;
+		}
+		QUIT(quit);
+	}
+	// ────────────────────────────────────────────────────────────────────────
+
 	CHIAKI_LOGI(session->log, "Starting session request for %s", session->connect_info.ps5 ? "PS5" : "PS4");
 
 	ChiakiTarget server_target = CHIAKI_TARGET_PS4_UNKNOWN;

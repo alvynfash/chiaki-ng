@@ -5092,6 +5092,12 @@ renderer_backend_ready:
         {
             connect(session, &StreamSession::SessionQuit, qGuiApp, &QGuiApplication::quit);
         }
+        if(session)
+        {
+            // Ensure window has keyboard focus for controller input
+            requestActivate();
+            raise();
+        }
         if(!session)
         {
             {
@@ -5795,7 +5801,11 @@ void QmlMainWindow::createSwapchain()
 #elif defined(Q_OS_MACOS)
     VkMetalSurfaceCreateInfoEXT surfaceInfo = {};
     surfaceInfo.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
-    surfaceInfo.pLayer = static_cast<const CAMetalLayer*>(reinterpret_cast<void*(*)(id, SEL)>(objc_msgSend)(reinterpret_cast<id>(winId()), sel_registerName("layer")));
+    // Use the CAMetalLayer prepared on the main thread in updateSwapchain() to
+    // avoid the Qt 6.10+ QContainerLayer / naturalDrawableSizeMVK crash.
+    surfaceInfo.pLayer = static_cast<const CAMetalLayer*>(metal_layer
+        ? metal_layer
+        : reinterpret_cast<void*(*)(id, SEL)>(objc_msgSend)(reinterpret_cast<id>(winId()), sel_registerName("layer")));
     err = vk_funcs.vkCreateMetalSurfaceEXT(placebo_vk_inst->instance, &surfaceInfo, nullptr, &surface);
 #elif defined(Q_OS_WIN)
     VkWin32SurfaceCreateInfoKHR surfaceInfo = {};
@@ -5880,6 +5890,22 @@ void QmlMainWindow::createSwapchain()
         vk_funcs.vkDestroySurfaceKHR(placebo_vk_inst->instance, surface, nullptr);
         surface = VK_NULL_HANDLE;
     }
+
+    // Pre-hint HDR10 so libplacebo picks a stable surface format upfront for HDR games
+    // (e.g. Spider-Man). With sRGB pre-hint, the first HDR10 frame triggered a
+    // reconfiguration that dropped enough frames to cause heartbeat failure during
+    // saveSyncInMenu. HDR10 pre-hint means zero reconfiguration for HDR streams.
+    // SDR games still get one early reconfiguration on the first SDR frame (at PTS ~0s),
+    // which is harmless — it happens before the server enters saveSyncInMenu.
+    if (placebo_swapchain) {
+        pl_swapchain_colorspace_hint(placebo_swapchain, &pl_color_space_hdr10);
+        // Record the pre-hint as last_hinted_csp so the per-frame guard sees it as
+        // already hinted. For HDR games (Spider-Man), the first real frame will also
+        // be HDR10, matching last_hinted_csp, so no re-hint fires and the lock sets.
+        // For SDR games, the first SDR frame differs from HDR10 → one re-hint fires,
+        // then the lock prevents all subsequent oscillation.
+        last_hinted_csp = pl_color_space_hdr10;
+    }
 }
 
 void QmlMainWindow::destroySwapchain()
@@ -5911,6 +5937,8 @@ void QmlMainWindow::destroySwapchain()
         quick_fbo = nullptr;
     }
     swapchain_size = QSize();
+    last_hinted_csp = {};
+    swapchain_csp_locked = false;
 }
 
 void QmlMainWindow::resizeSwapchain()
@@ -6025,6 +6053,36 @@ void QmlMainWindow::updateSwapchain()
 {
     Q_ASSERT(QThread::currentThread() == QGuiApplication::instance()->thread());
     const qint64 update_swapchain_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+
+#ifdef Q_OS_MACOS
+    // Qt 6.10+ uses QContainerLayer (a plain CALayer) as the NSView backing layer.
+    // MoltenVK calls naturalDrawableSizeMVK on it, which only exists on CAMetalLayer.
+    // Ensure metal_layer is a real CAMetalLayer, created here on the main thread.
+    if (!metal_layer) {
+        id nsView = reinterpret_cast<id>(winId());
+        id existing = reinterpret_cast<id(*)(id, SEL)>(objc_msgSend)(
+            nsView, sel_registerName("layer"));
+        Class mlClass = (Class)objc_getClass("CAMetalLayer");
+        bool already_metal = mlClass && reinterpret_cast<BOOL(*)(id, SEL, Class)>(objc_msgSend)(
+            existing, sel_registerName("isKindOfClass:"), mlClass);
+        if (already_metal) {
+            metal_layer = existing;
+        } else if (mlClass) {
+            id newLayer = reinterpret_cast<id(*)(id, SEL)>(objc_msgSend)(
+                reinterpret_cast<id>(mlClass), sel_registerName("layer"));
+            if (existing) {
+                // CGFloat is double on arm64/x86_64
+                double scale = reinterpret_cast<double(*)(id, SEL)>(objc_msgSend)(
+                    existing, sel_registerName("contentsScale"));
+                reinterpret_cast<void(*)(id, SEL, double)>(objc_msgSend)(
+                    newLayer, sel_registerName("setContentsScale:"), scale);
+            }
+            reinterpret_cast<void(*)(id, SEL, id)>(objc_msgSend)(
+                nsView, sel_registerName("setLayer:"), newLayer);
+            metal_layer = newLayer;
+        }
+    }
+#endif
 
     quick_item->setSize(size());
     quick_window->resize(size());
@@ -7066,7 +7124,21 @@ void QmlMainWindow::render()
     }();
     {
         QMutexLocker locker(&placebo_swapchain_mutex);
-        pl_swapchain_colorspace_hint(placebo_swapchain, &hint);
+        // Only update the swapchain colorspace hint when we have actual frame data AND
+        // the color space has changed from the last hint. Calling hint every frame causes
+        // oscillation: when the queue is briefly empty the hint would change back to the
+        // pre-hint value, triggering a surface reconfiguration that drops all queued frames
+        // and eventually causes a heartbeat failure.
+        // Lock the swapchain color space after the first real frame hint to prevent
+        // oscillation from HDR/SDR scene transitions (Spider-Man switches between
+        // HDR10 cutscenes and BT709 gameplay, causing repeated reconfigurations).
+        if(frame_mix.num_frames && !swapchain_csp_locked) {
+            if(!pl_color_space_equal(&hint, &last_hinted_csp)) {
+                pl_swapchain_colorspace_hint(placebo_swapchain, &hint);
+                last_hinted_csp = hint;
+            }
+            swapchain_csp_locked = true;
+        }
     }
     const qint64 render_setup_config_after_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
     if (render_setup_config_after_us >= render_setup_begin_us) {
@@ -7462,6 +7534,9 @@ bool QmlMainWindow::event(QEvent *event)
         if (handleShortcut(static_cast<QKeyEvent*>(event)))
             return true;
     case QEvent::KeyRelease:
+        fprintf(stderr, "[chiaki-kbd-debug] key=%d type=%d grab_input=%d session=%p\n",
+                static_cast<QKeyEvent*>(event)->key(), (int)event->type(), grab_input, (void*)session);
+        fflush(stderr);
         if (session && !grab_input) {
             QKeyEvent *e = static_cast<QKeyEvent*>(event);
             if (!e->spontaneous()) {
@@ -7503,11 +7578,8 @@ bool QmlMainWindow::event(QEvent *event)
     case QEvent::Expose:
         if (isExposed())
             updateSwapchain();
-        else
-            if (quick_render->thread() == QThread::currentThread())
-                destroySwapchain();
-            else
-                QMetaObject::invokeMethod(quick_render, std::bind(&QmlMainWindow::destroySwapchain, this), Qt::BlockingQueuedConnection);
+        else if (!session)
+            QMetaObject::invokeMethod(quick_render, std::bind(&QmlMainWindow::destroySwapchain, this), Qt::BlockingQueuedConnection);
         break;
     case QEvent::Move:
         if(!session && isWindowAdjustable())
