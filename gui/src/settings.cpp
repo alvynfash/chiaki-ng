@@ -2436,8 +2436,8 @@ QMap<int, Qt::Key> Settings::GetControllerMapping()
 		{CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT, Qt::Key::Key_Right},
 		{CHIAKI_CONTROLLER_BUTTON_DPAD_UP   , Qt::Key::Key_Up},
 		{CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN , Qt::Key::Key_Down},
-		{CHIAKI_CONTROLLER_BUTTON_L1        , Qt::Key::Key_2},
-		{CHIAKI_CONTROLLER_BUTTON_R1        , Qt::Key::Key_3},
+		{CHIAKI_CONTROLLER_BUTTON_L1        , Qt::Key::Key_Q},
+		{CHIAKI_CONTROLLER_BUTTON_R1        , Qt::Key::Key_E},
 		{CHIAKI_CONTROLLER_BUTTON_L3        , Qt::Key::Key_5},
 		{CHIAKI_CONTROLLER_BUTTON_R3        , Qt::Key::Key_6},
 		{CHIAKI_CONTROLLER_BUTTON_OPTIONS   , Qt::Key::Key_O},
@@ -2445,11 +2445,11 @@ QMap<int, Qt::Key> Settings::GetControllerMapping()
 		{CHIAKI_CONTROLLER_BUTTON_TOUCHPAD  , Qt::Key::Key_T},
 		{CHIAKI_CONTROLLER_BUTTON_PS        , Qt::Key::Key_Escape},
 		{CHIAKI_CONTROLLER_ANALOG_BUTTON_L2 , Qt::Key::Key_1},
-		{CHIAKI_CONTROLLER_ANALOG_BUTTON_R2 , Qt::Key::Key_4},
-		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_UP)   , Qt::Key::Key_BracketRight},
-		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_DOWN) , Qt::Key::Key_BracketLeft},
-		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_UP)   , Qt::Key::Key_Insert},
-		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_DOWN) , Qt::Key::Key_Delete},
+		{CHIAKI_CONTROLLER_ANALOG_BUTTON_R2 , Qt::Key::Key_Space},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_UP)   , Qt::Key::Key_D},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_DOWN) , Qt::Key::Key_A},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_UP)   , Qt::Key::Key_W},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_DOWN) , Qt::Key::Key_S},
 		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_X_UP)  , Qt::Key::Key_Equal},
 		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_X_DOWN), Qt::Key::Key_Minus},
 		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_Y_UP)  , Qt::Key::Key_PageUp},
@@ -2458,11 +2458,26 @@ QMap<int, Qt::Key> Settings::GetControllerMapping()
 
 	// Then fill in from settings
 	auto chiaki_buttons = result.keys();
+	fprintf(stderr, "[chiaki-keymap-debug] settings file: %s\n", qPrintable(settings.fileName()));
+	fprintf(stderr, "[chiaki-keymap-debug] allKeys (all):\n");
+	for(const auto &k : settings.allKeys())
+		fprintf(stderr, "  key=%s val=%s\n", qPrintable(k), qPrintable(settings.value(k).toString()));
+	fflush(stderr);
 	for(auto chiaki_button : chiaki_buttons)
 	{
 		auto button_name = GetChiakiControllerButtonName(chiaki_button).replace(' ', '_').toLower();
-		if(settings.contains("keymap/" + button_name))
-			result[static_cast<int>(chiaki_button)] = QKeySequence(settings.value("keymap/" + button_name).toString())[0].key();
+		const QString key_slash = "keymap/" + button_name;
+		const QString key_dot = QString("keymap") + QChar(0x00B7) + button_name;
+		const bool has_slash = settings.contains(key_slash);
+		const bool has_dot = settings.contains(key_dot);
+		bool has = has_slash || has_dot;
+		auto raw_val = settings.value(has_slash ? key_slash : key_dot).toString();
+		auto parsed_key = (int)QKeySequence(raw_val)[0].key();
+		fprintf(stderr, "[chiaki-keymap-debug] button=%s has=%d raw=%s parsed_key=%d\n",
+		        qPrintable(button_name), has, qPrintable(raw_val), parsed_key);
+		fflush(stderr);
+		if(has)
+			result[static_cast<int>(chiaki_button)] = QKeySequence(raw_val)[0].key();
 	}
 
 	return result;
@@ -2481,8 +2496,8 @@ void Settings::ClearKeyMapping()
 		{CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT, Qt::Key::Key_Right},
 		{CHIAKI_CONTROLLER_BUTTON_DPAD_UP   , Qt::Key::Key_Up},
 		{CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN , Qt::Key::Key_Down},
-		{CHIAKI_CONTROLLER_BUTTON_L1        , Qt::Key::Key_2},
-		{CHIAKI_CONTROLLER_BUTTON_R1        , Qt::Key::Key_3},
+		{CHIAKI_CONTROLLER_BUTTON_L1        , Qt::Key::Key_Q},
+		{CHIAKI_CONTROLLER_BUTTON_R1        , Qt::Key::Key_E},
 		{CHIAKI_CONTROLLER_BUTTON_L3        , Qt::Key::Key_5},
 		{CHIAKI_CONTROLLER_BUTTON_R3        , Qt::Key::Key_6},
 		{CHIAKI_CONTROLLER_BUTTON_OPTIONS   , Qt::Key::Key_O},
@@ -2490,11 +2505,11 @@ void Settings::ClearKeyMapping()
 		{CHIAKI_CONTROLLER_BUTTON_TOUCHPAD  , Qt::Key::Key_T},
 		{CHIAKI_CONTROLLER_BUTTON_PS        , Qt::Key::Key_Escape},
 		{CHIAKI_CONTROLLER_ANALOG_BUTTON_L2 , Qt::Key::Key_1},
-		{CHIAKI_CONTROLLER_ANALOG_BUTTON_R2 , Qt::Key::Key_4},
-		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_UP)   , Qt::Key::Key_BracketRight},
-		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_DOWN) , Qt::Key::Key_BracketLeft},
-		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_UP)   , Qt::Key::Key_Insert},
-		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_DOWN) , Qt::Key::Key_Delete},
+		{CHIAKI_CONTROLLER_ANALOG_BUTTON_R2 , Qt::Key::Key_Space},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_UP)   , Qt::Key::Key_D},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_X_DOWN) , Qt::Key::Key_A},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_UP)   , Qt::Key::Key_W},
+		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_LEFT_Y_DOWN) , Qt::Key::Key_S},
 		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_X_UP)  , Qt::Key::Key_Equal},
 		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_X_DOWN), Qt::Key::Key_Minus},
 		{static_cast<int>(ControllerButtonExt::ANALOG_STICK_RIGHT_Y_UP)  , Qt::Key::Key_PageUp},

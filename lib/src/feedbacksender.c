@@ -92,6 +92,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_feedback_sender_set_controller_state(Chiaki
 	feedback_sender->controller_state_history_prev = feedback_sender->controller_state;
 	feedback_sender->controller_state_changed = true;
 
+	CHIAKI_LOGI(feedback_sender->log, "FeedbackSender: controller state changed, buttons=0x%llx l2=%u r2=%u lx=%d ly=%d",
+		(unsigned long long)state->buttons, state->l2_state, state->r2_state, state->left_x, state->left_y);
+
 	chiaki_mutex_unlock(&feedback_sender->state_mutex);
 	chiaki_cond_signal(&feedback_sender->state_cond);
 
@@ -189,6 +192,12 @@ static void feedback_sender_flush_history_locked(ChiakiFeedbackSender *feedback_
 	if(feedback_sender->history_buf.len > FEEDBACK_HISTORY_RESEND_EVENT_COUNT)
 		feedback_sender->history_buf.len = FEEDBACK_HISTORY_RESEND_EVENT_COUNT;
 	feedback_sender->history_dirty = false;
+
+	if(feedback_sender->takion->cloud_direct)
+	{
+		feedback_sender->history_buf.begin = 0;
+		feedback_sender->history_buf.len = 0;
+	}
 }
 
 static void feedback_sender_record_history(ChiakiFeedbackSender *feedback_sender, const ChiakiControllerState *state_prev, const ChiakiControllerState *state_now)
@@ -316,8 +325,13 @@ static void *feedback_sender_thread_func(void *user)
 			send_feedback_state = true;
 
 			// don't need to send feedback state if nothing relevant changed
-			if(controller_state_equals_for_feedback_state(&state_now, &feedback_sender->controller_state_prev))
-				send_feedback_state = false;
+			// Cloud-direct: always send state alongside history (matches Python client behavior).
+			// Normal mode: skip state if only buttons changed (sticks/gyro unchanged).
+			if(!feedback_sender->takion->cloud_direct)
+			{
+				if(controller_state_equals_for_feedback_state(&state_now, &feedback_sender->controller_state_prev))
+					send_feedback_state = false;
+			}
 		} // else: timeout
 
 		if(feedback_sender->history_packet_len > 0)

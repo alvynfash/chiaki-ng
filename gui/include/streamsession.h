@@ -121,6 +121,14 @@ typedef struct haptic_packet_t
 		uint dpad_touch_shortcut2;
 		uint dpad_touch_shortcut3;
 		uint dpad_touch_shortcut4;
+	/** Cloud-direct: skip TCP session request and use morning as Takion key */
+	bool cloud_direct;
+	/** Cloud-direct: non-standard UDP port from Gaikai /allocate (0 = default) */
+	uint16_t stream_port;
+	/** Cloud-direct: Gaikai session ID (sessionId from /allocate) used as BIG session_key */
+	QString cloud_session_id;
+	/** Cloud-direct: launchSpecification base64 string from /allocate, used as BIG launch_spec */
+	QString cloud_launch_spec_b64;
 
 	StreamSessionConnectInfo() {}
 	StreamSessionConnectInfo(
@@ -135,7 +143,9 @@ typedef struct haptic_packet_t
 			bool auto_regist,
 			bool fullscreen,
 			bool zoom,
-			bool stretch);
+			bool stretch,
+			bool cloud_direct = false,
+			uint16_t stream_port = 0);
 };
 
 struct MicBuf
@@ -377,6 +387,22 @@ class StreamSession : public QObject
 		void ReadMic(const QByteArray &micdata);
 
 		void BlockInput(bool block) { input_block = block ? 1 : 2; SendFeedbackState(); }
+
+		void SetCtrlButton(uint32_t mask, bool pressed) {
+			if (pressed) keyboard_state.buttons |= mask;
+			else         keyboard_state.buttons &= ~mask;
+			SendFeedbackState();
+		}
+		enum class CtrlAxis { LeftX, LeftY, RightX, RightY };
+		void SetCtrlAxis(CtrlAxis axis, int16_t value) {
+			switch (axis) {
+				case CtrlAxis::LeftX:  keyboard_state.left_x  = value; break;
+				case CtrlAxis::LeftY:  keyboard_state.left_y  = value; break;
+				case CtrlAxis::RightX: keyboard_state.right_x = value; break;
+				case CtrlAxis::RightY: keyboard_state.right_y = value; break;
+			}
+			SendFeedbackState();
+		}
 
 	signals:
 		void FfmpegFrameAvailable();

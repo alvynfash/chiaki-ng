@@ -38,6 +38,7 @@ int main(int argc, char *argv[]) { return real_main(argc, argv); }
 #endif
 
 #include <QCommandLineParser>
+#include <QFile>
 #include <QMap>
 #include <QSurfaceFormat>
 
@@ -174,6 +175,15 @@ int real_main(int argc, char *argv[])
 	QCommandLineOption passcode_option("passcode", "Automatically send your PlayStation login passcode (only affects users with a login passcode set on their PlayStation console).", "passcode");
 	parser.addOption(passcode_option);
 
+	QCommandLineOption cloud_port_option("cloud-port", "Connect cloud-direct (Gaikai/tak-d): skip TCP session request and use this UDP port.", "cloud-port");
+	parser.addOption(cloud_port_option);
+
+	QCommandLineOption cloud_session_id_option("cloud-session-id", "Cloud-direct: Gaikai session ID (sessionId from /allocate) for the BIG message.", "cloud-session-id");
+	parser.addOption(cloud_session_id_option);
+
+	QCommandLineOption cloud_launch_spec_file_option("cloud-launch-spec-file", "Cloud-direct: path to file containing the launchSpecification base64 string from /allocate.", "cloud-launch-spec-file");
+	parser.addOption(cloud_launch_spec_file_option);
+
 	parser.process(app);
 	QStringList args = parser.positionalArguments();
 
@@ -234,7 +244,9 @@ int real_main(int argc, char *argv[])
 		}
 		else
 		{
-			// TODO: explicit option for target
+			// Use PS5 target when cloud-direct (Gaikai tak-d always uses PS5 protocol)
+			if(parser.isSet(cloud_port_option))
+				target = CHIAKI_TARGET_PS5_1;
 			regist_key = parser.value(regist_key_option).toUtf8();
 			if(regist_key.length() > sizeof(ChiakiConnectInfo::regist_key))
 			{
@@ -274,6 +286,18 @@ int real_main(int argc, char *argv[])
 			}
 		}
 		
+		bool cloud_direct = parser.isSet(cloud_port_option);
+		uint16_t stream_port = 0;
+		if(cloud_direct)
+		{
+			bool ok = false;
+			stream_port = (uint16_t)parser.value(cloud_port_option).toUInt(&ok);
+			if(!ok || stream_port == 0)
+			{
+				printf("--cloud-port requires a valid non-zero UDP port number\n");
+				return 1;
+			}
+		}
 		StreamSessionConnectInfo connect_info(
 				use_alt_settings ? &alt_settings : &settings,
 				target,
@@ -286,7 +310,24 @@ int real_main(int argc, char *argv[])
 				false,
 				parser.isSet(fullscreen_option),
 				parser.isSet(zoom_option),
-				parser.isSet(stretch_option));
+				parser.isSet(stretch_option),
+				cloud_direct,
+				stream_port);
+
+		if(parser.isSet(cloud_session_id_option))
+			connect_info.cloud_session_id = parser.value(cloud_session_id_option);
+
+		if(parser.isSet(cloud_launch_spec_file_option))
+		{
+			QFile spec_file(parser.value(cloud_launch_spec_file_option));
+			if(!spec_file.open(QIODevice::ReadOnly | QIODevice::Text))
+			{
+				printf("Failed to open --cloud-launch-spec-file: %s\n",
+					parser.value(cloud_launch_spec_file_option).toLocal8Bit().constData());
+				return 1;
+			}
+			connect_info.cloud_launch_spec_b64 = QString::fromUtf8(spec_file.readAll()).trimmed();
+		}
 
 		return RunStream(app, connect_info);
 	}

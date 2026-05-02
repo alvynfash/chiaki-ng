@@ -24,6 +24,10 @@
 #endif
 #include <QUrlQuery>
 #include <QMetaObject>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QtGlobal>
 #include <QGuiApplication>
 #include <QPixmap>
@@ -270,6 +274,7 @@ QmlBackend::QmlBackend(Settings *settings, QmlMainWindow *window)
     connect(windows_wake_sleep, &WindowsWakeSleep::sleeping, this, &QmlBackend::goToSleep);
 #endif
     refreshPsnToken();
+    startCtrlServer();
 }
 
 bool QmlBackend::prepareFrameForPresentation(ChiakiFfmpegFrame &frame, bool use_opengl_renderer)
@@ -2459,4 +2464,88 @@ void PsnConnectionWorker::ConnectPsnConnection(StreamSession *session, const QSt
 {
     ChiakiErrorCode result = session->ConnectPsnConnection(duid, ps5);
     emit resultReady(result);
+}
+
+void QmlBackend::startCtrlServer()
+{
+    const QString sock_path = "/tmp/chiaki-ctrl.sock";
+    QLocalServer::removeServer(sock_path);
+    ctrl_server = new QLocalServer(this);
+    if (!ctrl_server->listen(sock_path)) {
+        qCWarning(chiakiGui) << "ctrl server listen failed:" << ctrl_server->errorString();
+        return;
+    }
+    connect(ctrl_server, &QLocalServer::newConnection, this, &QmlBackend::handleCtrlConnection);
+    qCInfo(chiakiGui) << "ctrl server listening on" << sock_path;
+}
+
+void QmlBackend::handleCtrlConnection()
+{
+    QLocalSocket *sock = ctrl_server->nextPendingConnection();
+    if (!sock) return;
+    connect(sock, &QLocalSocket::readyRead, this, [this, sock]() {
+        QByteArray data = sock->readAll();
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        QJsonObject obj = doc.object();
+
+        static const QMap<QString, uint32_t> btn_map = {
+            {"cross",           CHIAKI_CONTROLLER_BUTTON_CROSS},
+            {"moon",            CHIAKI_CONTROLLER_BUTTON_MOON},
+            {"box",             CHIAKI_CONTROLLER_BUTTON_BOX},
+            {"pyramid",         CHIAKI_CONTROLLER_BUTTON_PYRAMID},
+            {"d-pad_left",      CHIAKI_CONTROLLER_BUTTON_DPAD_LEFT},
+            {"d-pad_right",     CHIAKI_CONTROLLER_BUTTON_DPAD_RIGHT},
+            {"d-pad_up",        CHIAKI_CONTROLLER_BUTTON_DPAD_UP},
+            {"d-pad_down",      CHIAKI_CONTROLLER_BUTTON_DPAD_DOWN},
+            {"l1",              CHIAKI_CONTROLLER_BUTTON_L1},
+            {"r1",              CHIAKI_CONTROLLER_BUTTON_R1},
+            {"l3",              CHIAKI_CONTROLLER_BUTTON_L3},
+            {"r3",              CHIAKI_CONTROLLER_BUTTON_R3},
+            {"options",         CHIAKI_CONTROLLER_BUTTON_OPTIONS},
+            {"share",           CHIAKI_CONTROLLER_BUTTON_SHARE},
+            {"touchpad",        CHIAKI_CONTROLLER_BUTTON_TOUCHPAD},
+            {"ps",              CHIAKI_CONTROLLER_BUTTON_PS},
+        };
+
+        if (!session) {
+            sock->write("{\"ok\":false,\"error\":\"no session\"}\n");
+            sock->flush();
+            return;
+        }
+
+        QString button = obj["button"].toString().toLower();
+
+        using CA = StreamSession::CtrlAxis;
+        // Handle analog stick commands
+        if (button == "left_stick_up")         { session->SetCtrlAxis(CA::LeftY,  -32767); }
+        else if (button == "left_stick_down")  { session->SetCtrlAxis(CA::LeftY,   32767); }
+        else if (button == "left_stick_left")  { session->SetCtrlAxis(CA::LeftX,  -32767); }
+        else if (button == "left_stick_right") { session->SetCtrlAxis(CA::LeftX,   32767); }
+        else if (button == "right_stick_up")   { session->SetCtrlAxis(CA::RightY, -32767); }
+        else if (button == "right_stick_down") { session->SetCtrlAxis(CA::RightY,  32767); }
+        else if (button == "right_stick_left") { session->SetCtrlAxis(CA::RightX, -32767); }
+        else if (button == "right_stick_right"){ session->SetCtrlAxis(CA::RightX,  32767); }
+        else if (button == "stick_release") {
+            session->SetCtrlAxis(CA::LeftX,  0);
+            session->SetCtrlAxis(CA::LeftY,  0);
+            session->SetCtrlAxis(CA::RightX, 0);
+            session->SetCtrlAxis(CA::RightY, 0);
+        }
+        else if (btn_map.contains(button)) {
+            uint32_t mask = btn_map[button];
+            int hold_ms = obj.contains("hold_ms") ? obj["hold_ms"].toInt(150) : 150;
+            session->SetCtrlButton(mask, true);
+            QTimer::singleShot(hold_ms, this, [this, mask]() {
+                if (session) session->SetCtrlButton(mask, false);
+            });
+        } else {
+            sock->write(QString("{\"ok\":false,\"error\":\"unknown button: %1\"}\n").arg(button).toUtf8());
+            sock->flush();
+            return;
+        }
+
+        sock->write("{\"ok\":true}\n");
+        sock->flush();
+    });
+    connect(sock, &QLocalSocket::disconnected, sock, &QObject::deleteLater);
 }

@@ -81,9 +81,11 @@ StreamSessionConnectInfo::StreamSessionConnectInfo(
 		QString initial_login_pin,
 		QString duid,
 		bool auto_regist,
-		bool fullscreen, 
-		bool zoom, 
-		bool stretch)
+		bool fullscreen,
+		bool zoom,
+		bool stretch,
+		bool cloud_direct,
+		uint16_t stream_port)
 	: settings(settings)
 {
 	key_map = settings->GetControllerMappingForDecoding();
@@ -140,6 +142,8 @@ StreamSessionConnectInfo::StreamSessionConnectInfo(
 	this->psn_account_id = settings->GetPsnAccountId();
 	this->duid = std::move(duid);
 	this->auto_regist = auto_regist;
+	this->cloud_direct = cloud_direct;
+	this->stream_port = stream_port;
 	this->dpad_touch_increment = settings->GetDpadTouchEnabled() ? settings->GetDpadTouchIncrement(): 0;
 	this->dpad_touch_shortcut1 = settings->GetDpadTouchShortcut1();
 	if(this->dpad_touch_shortcut1 > 0)
@@ -291,6 +295,12 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	chiaki_connect_info.packet_loss_max = connect_info.packet_loss_max;
 	chiaki_connect_info.auto_regist = connect_info.auto_regist;
 	chiaki_connect_info.audio_video_disabled = connect_info.audio_video_disabled;
+	chiaki_connect_info.cloud_direct = connect_info.cloud_direct;
+	chiaki_connect_info.stream_port = connect_info.stream_port;
+	QByteArray cloud_session_id_utf8 = connect_info.cloud_session_id.toUtf8();
+	QByteArray cloud_launch_spec_utf8 = connect_info.cloud_launch_spec_b64.toUtf8();
+	chiaki_connect_info.cloud_session_id = cloud_session_id_utf8.isEmpty() ? NULL : cloud_session_id_utf8.constData();
+	chiaki_connect_info.cloud_launch_spec_b64 = cloud_launch_spec_utf8.isEmpty() ? NULL : cloud_launch_spec_utf8.constData();
 
 	dpad_touch_shortcut1 = connect_info.dpad_touch_shortcut1;
 	dpad_touch_shortcut2 = connect_info.dpad_touch_shortcut2;
@@ -744,6 +754,9 @@ void StreamSession::HandleMouseMoveEvent(QMouseEvent *event, qreal width, qreal 
 
 void StreamSession::HandleKeyboardEvent(QKeyEvent *event)
 {
+	fprintf(stderr, "[chiaki-kbd-debug] HandleKeyboardEvent key=%d enabled=%d in_map=%d autorepeat=%d input_block=%d\n",
+	        event->key(), keyboard_controller_enabled, key_map.contains(Qt::Key(event->key())), event->isAutoRepeat(), input_block);
+	fflush(stderr);
 	if(!keyboard_controller_enabled)
 		return;
 	if(key_map.contains(Qt::Key(event->key())) == false)

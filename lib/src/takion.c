@@ -2,6 +2,9 @@
 
 #include "chiaki/feedback.h"
 #include <chiaki/takion.h>
+#ifndef CHIAKI_LIB_ENABLE_MBEDTLS
+#include <openssl/evp.h>
+#endif
 #include <chiaki/congestioncontrol.h>
 #include <chiaki/random.h>
 #include <chiaki/gkcrypt.h>
@@ -56,6 +59,22 @@
 #define TAKION_EXPECT_TIMEOUT_MS 5000
 
 #define MAX_CONNECT_RESEND_TRIES 3
+
+// Cloud-direct (tak-d) prefix inserted after the packet-type byte in client→server CONTROL packets
+#define TAKION_CLOUD_PREFIX_SIZE 4
+#define TAKION_CLOUD_PREFIX_VALUE 0x00010000u
+
+static inline void takion_write_cloud_prefix(uint8_t *buf)
+{
+	buf[0] = 0x00;
+	buf[1] = 0x00;
+	buf[2] = 0x01;
+	buf[3] = 0x00;
+}
+// Cloud CONTROL offsets (from datagram start):
+//   0: packet type, 1-4: prefix, 5-8: tag, 9-12: GMAC, 13-16: key_pos
+#define CLOUD_CTRL_GMAC_OFFSET   9
+#define CLOUD_CTRL_KEYPOS_OFFSET 13
 /**
  * Base type of Takion packets. Lower nibble of the first byte in datagrams.
  */
@@ -237,6 +256,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 	takion->postponed_packets_size = 0;
 	takion->postponed_packets_count = 0;
 	takion->enable_dualsense = info->enable_dualsense;
+	takion->cloud_direct = info->cloud_direct;
 
 	CHIAKI_LOGI(takion->log, "Takion connecting (version %u)", (unsigned int)info->protocol_version);
 	bool mac_dontfrag = true;
@@ -504,6 +524,74 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_raw(ChiakiTakion *takion, const
 	return CHIAKI_ERR_SUCCESS;
 }
 
+/**
+ * Cloud-direct (tak-d) variant of chiaki_takion_send for CONTROL packets.
+ *
+ * Cloud servers require a 4-byte prefix (0x00010000) before the packet-type
+ * byte. This shifts the GMAC field from offset 5 to offset 9.
+ * This helper:
+ *   1. Takes a standard inner packet [1B type][16B header][payload]
+ *   2. Builds the cloud packet [4B prefix][1B type][16B header][payload]
+ *   3. Recomputes GMAC at offset 9 of the cloud packet
+ *   4. Returns the allocated cloud packet in *cloud_buf_out (caller must free)
+ *
+ * @param cloud_buf_out pointer to receive the allocated cloud packet buffer
+ * @param cloud_size_out pointer to receive the cloud packet size
+ */
+static ChiakiErrorCode takion_cloud_build_control(ChiakiTakion *takion,
+	const uint8_t *buf, size_t buf_size, uint64_t key_pos,
+	uint8_t **cloud_buf_out, size_t *cloud_size_out)
+{
+	// Standard CONTROL packet layout: [0: type][1-4: tag][5-8: GMAC][9-12: key_pos][rest...]
+	// Cloud CONTROL packet layout:    [0-3: prefix][4: type][5-8: tag][9-12: GMAC][13-16: key_pos][rest...]
+	//
+	// GMAC must be computed over the STANDARD packet format (without the cloud prefix),
+	// with key_pos zeroed at offset 9 during computation (per chiaki_takion_packet_mac rules).
+	// After computing GMAC into the standard packet at offset 5, we insert the prefix —
+	// the GMAC naturally lands at cloud offset 9.
+
+	// Step 1: mutable copy of the standard packet (caller already wrote key_pos at the
+	// type-specific offset; chiaki_takion_packet_mac will zero it during GMAC computation)
+	uint8_t *std_buf = malloc(buf_size);
+	if(!std_buf)
+		return CHIAKI_ERR_MEMORY;
+	memcpy(std_buf, buf, buf_size);
+
+	// Step 2: compute GMAC in-place on the standard packet under the crypto mutex
+	ChiakiErrorCode err = chiaki_mutex_lock(&takion->gkcrypt_local_mutex);
+	if(err != CHIAKI_ERR_SUCCESS)
+	{
+		free(std_buf);
+		return err;
+	}
+	err = chiaki_takion_packet_mac(takion->gkcrypt_local, std_buf, buf_size, key_pos, NULL, NULL);
+	chiaki_mutex_unlock(&takion->gkcrypt_local_mutex);
+
+	if(err != CHIAKI_ERR_SUCCESS)
+	{
+		free(std_buf);
+		return err;
+	}
+
+	// Step 3: build cloud packet by inserting the 4-byte prefix before the type byte
+	// GMAC now at std_buf[5..8] will land at cloud_buf[9..12] after the shift
+	size_t cloud_size = buf_size + TAKION_CLOUD_PREFIX_SIZE;
+	uint8_t *cloud_buf = malloc(cloud_size);
+	if(!cloud_buf)
+	{
+		free(std_buf);
+		return CHIAKI_ERR_MEMORY;
+	}
+	takion_write_cloud_prefix(cloud_buf);
+	cloud_buf[TAKION_CLOUD_PREFIX_SIZE] = std_buf[0]; // type byte
+	memcpy(cloud_buf + TAKION_CLOUD_PREFIX_SIZE + 1, std_buf + 1, buf_size - 1);
+	free(std_buf);
+
+	*cloud_buf_out = cloud_buf;
+	*cloud_size_out = cloud_size;
+	return CHIAKI_ERR_SUCCESS;
+}
+
 static ChiakiErrorCode chiaki_takion_packet_read_key_pos(ChiakiTakion *takion, uint8_t *buf, size_t buf_size, uint64_t *key_pos_out)
 {
 	if(buf_size < 1)
@@ -586,7 +674,67 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_message_data(ChiakiTakion *taki
 	// TODO: split packet if necessary?
 
 	uint64_t key_pos;
-	ChiakiErrorCode err = chiaki_takion_crypt_advance_key_pos(takion, buf_size, &key_pos);
+	ChiakiErrorCode err;
+
+	// Cloud-direct: CONTROL packets need real GMAC + cloud prefix (0x00010000).
+	// The server verifies GMAC on CONTROL packets. Payload stays plaintext (no AES-CTR).
+	// No send buffer — server never sends DATA_ACK in cloud-direct mode.
+	if(takion->cloud_direct)
+	{
+		err = chiaki_takion_crypt_advance_key_pos(takion, buf_size, &key_pos);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
+
+		// Build standard packet with real key_pos
+		size_t packet_size = 1 + TAKION_MESSAGE_HEADER_SIZE + 9 + buf_size;
+		uint8_t *packet_buf = malloc(packet_size);
+		if(!packet_buf)
+			return CHIAKI_ERR_MEMORY;
+		packet_buf[0] = TAKION_PACKET_TYPE_CONTROL;
+
+		err = chiaki_mutex_lock(&takion->seq_num_local_mutex);
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			free(packet_buf);
+			return err;
+		}
+		ChiakiSeqNum32 seq_num_val = takion->seq_num_local++;
+		chiaki_mutex_unlock(&takion->seq_num_local_mutex);
+
+		takion_write_message_header(packet_buf + 1, takion->tag_remote, key_pos,
+			TAKION_CHUNK_TYPE_DATA, chunk_flags, 9 + buf_size);
+
+		uint8_t *msg_payload = packet_buf + 1 + TAKION_MESSAGE_HEADER_SIZE;
+		*((chiaki_unaligned_uint32_t *)(msg_payload + 0)) = htonl(seq_num_val);
+		*((chiaki_unaligned_uint16_t *)(msg_payload + 4)) = htons(channel);
+		*((chiaki_unaligned_uint16_t *)(msg_payload + 6)) = 0;
+		*(msg_payload + 8) = 0;
+		memcpy(msg_payload + 9, buf, buf_size);
+
+		// Compute GMAC and add cloud prefix
+		uint8_t *cloud_buf;
+		size_t cloud_size;
+		err = takion_cloud_build_control(takion, packet_buf, packet_size, key_pos,
+			&cloud_buf, &cloud_size);
+		free(packet_buf);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
+
+		err = chiaki_takion_send_raw(takion, cloud_buf, cloud_size);
+		free(cloud_buf);
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			CHIAKI_LOGE(takion->log, "Takion failed to send cloud data packet: %s", chiaki_error_string(err));
+			return err;
+		}
+		// No send buffer push — server never ACKs in cloud-direct mode
+
+		if(seq_num)
+			*seq_num = seq_num_val;
+		return err;
+	}
+
+	err = chiaki_takion_crypt_advance_key_pos(takion, buf_size, &key_pos);
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
 
@@ -612,15 +760,16 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_message_data(ChiakiTakion *taki
 	*(msg_payload + 8) = 0;
 	memcpy(msg_payload + 9, buf, buf_size);
 
-	err = chiaki_takion_send(takion, packet_buf, packet_size, key_pos); // will alter packet_buf with gmac
-	if(err != CHIAKI_ERR_SUCCESS)
 	{
-		CHIAKI_LOGE(takion->log, "Takion failed to send data packet: %s", chiaki_error_string(err));
-		free(packet_buf);
-		return err;
+		err = chiaki_takion_send(takion, packet_buf, packet_size, key_pos); // will alter packet_buf with gmac
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			CHIAKI_LOGE(takion->log, "Takion failed to send data packet: %s", chiaki_error_string(err));
+			free(packet_buf);
+			return err;
+		}
+		chiaki_takion_send_buffer_push(&takion->send_buffer, seq_num_val, packet_buf, packet_size);
 	}
-
-	chiaki_takion_send_buffer_push(&takion->send_buffer, seq_num_val, packet_buf, packet_size);
 
 	if(seq_num)
 		*seq_num = seq_num_val;
@@ -634,7 +783,57 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_message_data_cont(ChiakiTakion 
 	// TODO: split packet if necessary?
 
 	uint64_t key_pos;
-	ChiakiErrorCode err = chiaki_takion_crypt_advance_key_pos(takion, buf_size, &key_pos);
+	ChiakiErrorCode err;
+
+	if(takion->cloud_direct)
+	{
+		err = chiaki_takion_crypt_advance_key_pos(takion, buf_size, &key_pos);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
+
+		size_t packet_size = 1 + TAKION_MESSAGE_HEADER_SIZE + 8 + buf_size;
+		uint8_t *packet_buf = malloc(packet_size);
+		if(!packet_buf)
+			return CHIAKI_ERR_MEMORY;
+		packet_buf[0] = TAKION_PACKET_TYPE_CONTROL;
+
+		err = chiaki_mutex_lock(&takion->seq_num_local_mutex);
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			free(packet_buf);
+			return err;
+		}
+		ChiakiSeqNum32 seq_num_val = takion->seq_num_local++;
+		chiaki_mutex_unlock(&takion->seq_num_local_mutex);
+
+		takion_write_message_header(packet_buf + 1, takion->tag_remote, key_pos,
+			TAKION_CHUNK_TYPE_DATA, chunk_flags, 8 + buf_size);
+
+		uint8_t *msg_payload = packet_buf + 1 + TAKION_MESSAGE_HEADER_SIZE;
+		*((chiaki_unaligned_uint32_t *)(msg_payload + 0)) = htonl(seq_num_val);
+		*((chiaki_unaligned_uint16_t *)(msg_payload + 4)) = htons(channel);
+		*((chiaki_unaligned_uint16_t *)(msg_payload + 6)) = 0;
+		memcpy(msg_payload + 8, buf, buf_size);
+
+		uint8_t *cloud_buf;
+		size_t cloud_size;
+		err = takion_cloud_build_control(takion, packet_buf, packet_size, key_pos,
+			&cloud_buf, &cloud_size);
+		free(packet_buf);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
+
+		err = chiaki_takion_send_raw(takion, cloud_buf, cloud_size);
+		free(cloud_buf);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
+
+		if(seq_num)
+			*seq_num = seq_num_val;
+		return err;
+	}
+
+	err = chiaki_takion_crypt_advance_key_pos(takion, buf_size, &key_pos);
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
 
@@ -659,15 +858,16 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_message_data_cont(ChiakiTakion 
 	*((chiaki_unaligned_uint16_t *)(msg_payload + 6)) = 0;
 	memcpy(msg_payload + 8, buf, buf_size);
 
-	err = chiaki_takion_send(takion, packet_buf, packet_size, key_pos); // will alter packet_buf with gmac
-	if(err != CHIAKI_ERR_SUCCESS)
 	{
-		CHIAKI_LOGE(takion->log, "Takion failed to send data packet: %s", chiaki_error_string(err));
-		free(packet_buf);
-		return err;
+		err = chiaki_takion_send(takion, packet_buf, packet_size, key_pos); // will alter packet_buf with gmac
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			CHIAKI_LOGE(takion->log, "Takion failed to send data packet: %s", chiaki_error_string(err));
+			free(packet_buf);
+			return err;
+		}
+		chiaki_takion_send_buffer_push(&takion->send_buffer, seq_num_val, packet_buf, packet_size);
 	}
-
-	chiaki_takion_send_buffer_push(&takion->send_buffer, seq_num_val, packet_buf, packet_size);
 
 	if(seq_num)
 		*seq_num = seq_num_val;
@@ -677,6 +877,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_message_data_cont(ChiakiTakion 
 
 static ChiakiErrorCode chiaki_takion_send_message_data_ack(ChiakiTakion *takion, uint32_t seq_num)
 {
+	// Cloud-direct: skip DATA_ACKs entirely. The cloud server manages flow control
+	// server-side and does not require client ACKs. Sending them would advance
+	// key_pos_local thousands of times (once per video frame), causing the server's
+	// expected key_pos to diverge from ours at HEARTBEAT verification → GMAC failure.
+	if(takion->cloud_direct)
+		return CHIAKI_ERR_SUCCESS;
+
 	uint8_t buf[1 + TAKION_MESSAGE_HEADER_SIZE + 0xc];
 	buf[0] = TAKION_PACKET_TYPE_CONTROL;
 
@@ -692,7 +899,6 @@ static ChiakiErrorCode chiaki_takion_send_message_data_ack(ChiakiTakion *takion,
 	*((chiaki_unaligned_uint32_t *)(data_ack + 4)) = htonl(takion->a_rwnd);
 	*((chiaki_unaligned_uint16_t *)(data_ack + 8)) = 0;
 	*((chiaki_unaligned_uint16_t *)(data_ack + 0xa)) = 0;
-
 	return chiaki_takion_send(takion, buf, sizeof(buf), key_pos);
 }
 
@@ -715,12 +921,98 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_congestion(ChiakiTakion *takion
 
 	uint8_t buf[CHIAKI_TAKION_CONGESTION_PACKET_SIZE];
 	chiaki_takion_format_congestion(buf, packet, key_pos);
+
+	if(takion->cloud_direct)
+	{
+		// Cloud-direct: congestion uses the unified key_pos_local counter (same as all other packets).
+		// Compute GMAC with gkcrypt_local, then send with cloud prefix.
+		ChiakiErrorCode mac_err = chiaki_takion_packet_mac(takion->gkcrypt_local, buf, sizeof(buf), key_pos, NULL, NULL);
+		if(mac_err != CHIAKI_ERR_SUCCESS)
+			memset(buf + 7, 0, CHIAKI_GKCRYPT_GMAC_SIZE);
+
+		size_t cloud_size = sizeof(buf) + TAKION_CLOUD_PREFIX_SIZE;
+		uint8_t *cloud_buf = malloc(cloud_size);
+		if(!cloud_buf)
+			return CHIAKI_ERR_MEMORY;
+		takion_write_cloud_prefix(cloud_buf);
+		cloud_buf[TAKION_CLOUD_PREFIX_SIZE] = buf[0];
+		memcpy(cloud_buf + TAKION_CLOUD_PREFIX_SIZE + 1, buf + 1, sizeof(buf) - 1);
+		err = chiaki_takion_send_raw(takion, cloud_buf, cloud_size);
+		free(cloud_buf);
+		return err;
+	}
+
 	return chiaki_takion_send(takion, buf, sizeof(buf), key_pos);
 }
 
 static ChiakiErrorCode takion_send_feedback_packet(ChiakiTakion *takion, uint8_t *buf, size_t buf_size)
 {
 	assert(buf_size >= 0xc);
+
+	// Cloud-direct feedback uses the same gkcrypt_local and key_pos_local counter as all
+	// other outgoing packets (CONTROL, CONGESTION). Pcap analysis of the working Asobi client
+	// confirms a single unified key_pos counter: all packet types share key_pos_local and
+	// gkcrypt_local derived from the BANG handshake. DM2 is a server-side keep-alive, not a
+	// key exchange. No separate gkcrypt_feedback or key_pos_feedback needed.
+	if(takion->cloud_direct)
+	{
+		size_t payload_size = buf_size - 0xc;
+
+		// Advance key_pos_local using the standard formula: payload + block_size + alignment.
+		uint64_t key_pos;
+		ChiakiErrorCode err = chiaki_takion_crypt_advance_key_pos(takion, payload_size + CHIAKI_GKCRYPT_BLOCK_SIZE, &key_pos);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
+
+		*((chiaki_unaligned_uint32_t *)(buf + 4)) = htonl((uint32_t)key_pos);
+
+		// Encrypt payload and compute GMAC using gkcrypt_local (BANG-derived key).
+		ChiakiErrorCode err2 = chiaki_mutex_lock(&takion->gkcrypt_local_mutex);
+		if(err2 != CHIAKI_ERR_SUCCESS)
+			return err2;
+
+		if(takion->gkcrypt_local)
+		{
+			ChiakiErrorCode enc_err = chiaki_gkcrypt_encrypt(takion->gkcrypt_local, key_pos + CHIAKI_GKCRYPT_BLOCK_SIZE, buf + 0xc, payload_size);
+			if(enc_err != CHIAKI_ERR_SUCCESS)
+				CHIAKI_LOGE(takion->log, "Takion cloud feedback encrypt failed");
+
+			ChiakiErrorCode gmac_err = chiaki_gkcrypt_gmac(takion->gkcrypt_local, key_pos, buf, buf_size, buf + 8);
+			if(gmac_err != CHIAKI_ERR_SUCCESS)
+			{
+				CHIAKI_LOGE(takion->log, "Takion cloud feedback gmac failed, zeroing GMAC");
+				memset(buf + 8, 0, CHIAKI_GKCRYPT_GMAC_SIZE);
+			}
+		}
+		else
+		{
+			*((chiaki_unaligned_uint32_t *)(buf + 4)) = 0;
+			memset(buf + 8, 0, CHIAKI_GKCRYPT_GMAC_SIZE);
+		}
+
+		chiaki_mutex_unlock(&takion->gkcrypt_local_mutex);
+
+		size_t cloud_size = buf_size + TAKION_CLOUD_PREFIX_SIZE;
+		uint8_t *cloud_buf = malloc(cloud_size);
+		if(!cloud_buf)
+			return CHIAKI_ERR_MEMORY;
+		takion_write_cloud_prefix(cloud_buf);
+		cloud_buf[TAKION_CLOUD_PREFIX_SIZE] = buf[0];
+		memcpy(cloud_buf + TAKION_CLOUD_PREFIX_SIZE + 1, buf + 1, buf_size - 1);
+
+		if(takion->log)
+		{
+			char hex[256] = {0};
+			size_t log_len = cloud_size < 40 ? cloud_size : 40;
+			for(size_t i = 0; i < log_len; i++)
+				snprintf(hex + i*3, sizeof(hex) - i*3, "%02x ", cloud_buf[i]);
+			CHIAKI_LOGI(takion->log, "Takion feedback_pkt wire [%zu bytes]: %s", cloud_size, hex);
+		}
+
+		err = chiaki_takion_send_raw(takion, cloud_buf, cloud_size);
+		free(cloud_buf);
+		return err;
+	}
 
 	size_t payload_size = buf_size - 0xc;
 
@@ -804,9 +1096,17 @@ beach:
 	return err;
 }
 
+// Cloud-direct FEEDBACK_HISTORY payload is always 48 bytes (pcap-confirmed Asobi wire size:
+// 64 bytes total - 4 cloud prefix - 12 header = 48 bytes payload). Zero-pad shorter payloads.
+#define TAKION_CLOUD_FEEDBACK_HISTORY_PAYLOAD_SIZE 48
+
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_history(ChiakiTakion *takion, ChiakiSeqNum16 seq_num, uint8_t *payload, size_t payload_size)
 {
-	size_t buf_size = 0xc + payload_size;
+	size_t padded_payload_size = payload_size;
+	if(takion->cloud_direct && padded_payload_size < TAKION_CLOUD_FEEDBACK_HISTORY_PAYLOAD_SIZE)
+		padded_payload_size = TAKION_CLOUD_FEEDBACK_HISTORY_PAYLOAD_SIZE;
+
+	size_t buf_size = 0xc + padded_payload_size;
 	uint8_t *buf = malloc(buf_size);
 	if(!buf)
 		return CHIAKI_ERR_MEMORY;
@@ -816,6 +1116,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_history(ChiakiTakion *
 	*((chiaki_unaligned_uint32_t *)(buf + 4)) = 0; // key pos
 	*((chiaki_unaligned_uint32_t *)(buf + 8)) = 0; // gmac
 	memcpy(buf + 0xc, payload, payload_size);
+	if(padded_payload_size > payload_size)
+		memset(buf + 0xc + payload_size, 0, padded_payload_size - payload_size);
+
 	ChiakiErrorCode err = takion_send_feedback_packet(takion, buf, buf_size);
 	free(buf);
 	return err;
@@ -1220,6 +1523,12 @@ static ChiakiErrorCode takion_handle_packet_mac(ChiakiTakion *takion, uint8_t ba
 	if(!takion->gkcrypt_remote)
 		return CHIAKI_ERR_SUCCESS;
 
+	// Cloud-direct servers (tak-d) do not authenticate packets they send to the client.
+	// gkcrypt_remote is still initialized (for local GMAC on outgoing packets) but
+	// received packets carry no valid GMAC, so skip verification entirely.
+	if(takion->cloud_direct)
+		return CHIAKI_ERR_SUCCESS;
+
 	uint8_t mac[CHIAKI_GKCRYPT_GMAC_SIZE];
 	uint8_t mac_expected[CHIAKI_GKCRYPT_GMAC_SIZE];
 	uint64_t key_pos;
@@ -1511,6 +1820,20 @@ static ChiakiErrorCode takion_parse_message(ChiakiTakion *takion, uint8_t *buf, 
 
 static ChiakiErrorCode takion_send_message_init(ChiakiTakion *takion, TakionMessagePayloadInit *payload)
 {
+	if(takion->cloud_direct)
+	{
+		uint8_t message[TAKION_CLOUD_PREFIX_SIZE + 1 + TAKION_MESSAGE_HEADER_SIZE + 0x10];
+		takion_write_cloud_prefix(message);
+		message[TAKION_CLOUD_PREFIX_SIZE] = TAKION_PACKET_TYPE_CONTROL;
+		takion_write_message_header(message + TAKION_CLOUD_PREFIX_SIZE + 1, takion->tag_remote, 0, TAKION_CHUNK_TYPE_INIT, 0, 0x10);
+		uint8_t *pl = message + TAKION_CLOUD_PREFIX_SIZE + 1 + TAKION_MESSAGE_HEADER_SIZE;
+		*((chiaki_unaligned_uint32_t *)(pl + 0)) = htonl(payload->tag);
+		*((chiaki_unaligned_uint32_t *)(pl + 4)) = htonl(payload->a_rwnd);
+		*((chiaki_unaligned_uint16_t *)(pl + 8)) = htons(payload->outbound_streams);
+		*((chiaki_unaligned_uint16_t *)(pl + 0xa)) = htons(payload->inbound_streams);
+		*((chiaki_unaligned_uint32_t *)(pl + 0xc)) = htonl(payload->initial_seq_num);
+		return chiaki_takion_send_raw(takion, message, sizeof(message));
+	}
 	uint8_t message[1 + TAKION_MESSAGE_HEADER_SIZE + 0x10];
 	message[0] = TAKION_PACKET_TYPE_CONTROL;
 	takion_write_message_header(message + 1, takion->tag_remote, 0, TAKION_CHUNK_TYPE_INIT, 0, 0x10);
@@ -1527,6 +1850,15 @@ static ChiakiErrorCode takion_send_message_init(ChiakiTakion *takion, TakionMess
 
 static ChiakiErrorCode takion_send_message_cookie(ChiakiTakion *takion, uint8_t *cookie)
 {
+	if(takion->cloud_direct)
+	{
+		uint8_t message[TAKION_CLOUD_PREFIX_SIZE + 1 + TAKION_MESSAGE_HEADER_SIZE + TAKION_COOKIE_SIZE];
+		takion_write_cloud_prefix(message);
+		message[TAKION_CLOUD_PREFIX_SIZE] = TAKION_PACKET_TYPE_CONTROL;
+		takion_write_message_header(message + TAKION_CLOUD_PREFIX_SIZE + 1, takion->tag_remote, 0, TAKION_CHUNK_TYPE_COOKIE, 0, TAKION_COOKIE_SIZE);
+		memcpy(message + TAKION_CLOUD_PREFIX_SIZE + 1 + TAKION_MESSAGE_HEADER_SIZE, cookie, TAKION_COOKIE_SIZE);
+		return chiaki_takion_send_raw(takion, message, sizeof(message));
+	}
 	uint8_t message[1 + TAKION_MESSAGE_HEADER_SIZE + TAKION_COOKIE_SIZE];
 	message[0] = TAKION_PACKET_TYPE_CONTROL;
 	takion_write_message_header(message + 1, takion->tag_remote, 0, TAKION_CHUNK_TYPE_COOKIE, 0, TAKION_COOKIE_SIZE);

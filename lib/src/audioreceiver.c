@@ -91,15 +91,31 @@ CHIAKI_EXPORT void chiaki_audio_receiver_av_packet(ChiakiAudioReceiver *audio_re
 		return;
 	}
 
-	uint8_t source_units_count = chiaki_takion_av_packet_audio_source_units_count(packet);
-	uint8_t fec_units_count = chiaki_takion_av_packet_audio_fec_units_count(packet);
-	uint8_t unit_size = chiaki_takion_av_packet_audio_unit_size(packet);
-
 	if(!packet->data_size)
 	{
 		CHIAKI_LOGE(audio_receiver->log, "Audio AV Packet is empty");
 		return;
 	}
+
+	// Cloud-direct (tak-d) audio packets don't use the source/FEC unit structure —
+	// the entire payload is a single Opus frame. Pass it straight through.
+	if(audio_receiver->session->connect_info.cloud_direct)
+	{
+		if((packet->frame_index & 0x1ff) == 0)
+			CHIAKI_LOGI(audio_receiver->log, "AudioReceiver cloud-direct: frame=%u haptics=%d size=%zu sink_cb=%p",
+				(unsigned)packet->frame_index, (int)packet->is_haptics, packet->data_size,
+				(void *)audio_receiver->session->audio_sink.frame_cb);
+		chiaki_audio_receiver_frame(audio_receiver, packet->frame_index, packet->is_haptics, packet->data, packet->data_size);
+		if(audio_receiver->packet_stats)
+			chiaki_packet_stats_push_seq(audio_receiver->packet_stats, packet->frame_index);
+		return;
+	}
+
+	// this is mostly observation-based, so may not necessarily cover everything yet.
+
+	uint8_t source_units_count = chiaki_takion_av_packet_audio_source_units_count(packet);
+	uint8_t fec_units_count = chiaki_takion_av_packet_audio_fec_units_count(packet);
+	uint8_t unit_size = chiaki_takion_av_packet_audio_unit_size(packet);
 
 	if((uint16_t)fec_units_count + (uint16_t)source_units_count != packet->units_in_frame_total)
 	{

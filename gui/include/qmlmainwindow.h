@@ -234,7 +234,12 @@ private:
     std::array<pl_tex, 8> placebo_tex{};
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     int vk_decode_queue_index = -1;
+#ifdef Q_OS_MACOS
+    void *metal_layer = nullptr; // CAMetalLayer*, created on main thread before render thread uses it
+#endif
     QSize swapchain_size;
+    struct pl_color_space last_hinted_csp = {};
+    bool swapchain_csp_locked = false;
     QThread *render_thread = {};
     bool owns_render_thread = false;
     QMutex render_schedule_mutex;

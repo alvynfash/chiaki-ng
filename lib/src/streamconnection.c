@@ -12,6 +12,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
+#include <stdlib.h>
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/types.h>
@@ -24,6 +25,9 @@
 #include <pb_decode.h>
 #include <pb.h>
 
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+
 #include "utils.h"
 #include "pb_utils.h"
 
@@ -31,6 +35,9 @@
 #define STREAM_CONNECTION_PORT 9296
 
 #define EXPECT_TIMEOUT_MS 5000
+// Cloud-direct servers may take up to 150 s to start the game after BANG
+// (matches the server-side startGameTimeout from the allocate response).
+#define EXPECT_STREAMINFO_TIMEOUT_MS 150000
 
 #define HEARTBEAT_INTERVAL_MS 1000
 
@@ -55,11 +62,49 @@ static ChiakiErrorCode stream_connection_send_controller_connection(ChiakiStream
 static ChiakiErrorCode stream_connection_enable_microphone(ChiakiStreamConnection *stream_connection);
 static ChiakiErrorCode stream_connection_send_disconnect(ChiakiStreamConnection *stream_connection);
 static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
+static void stream_connection_handle_directmessage_rekey(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
 static void stream_connection_takion_data_expect_bang(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
 static void stream_connection_takion_data_expect_streaminfo(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
 static ChiakiErrorCode stream_connection_send_streaminfo_ack(ChiakiStreamConnection *stream_connection);
 static void stream_connection_takion_av(ChiakiStreamConnection *stream_connection, ChiakiTakionAVPacket *packet);
 static ChiakiErrorCode stream_connection_send_heartbeat(ChiakiStreamConnection *stream_connection);
+
+static void stream_connection_cloud_controller_variant_from_env(ChiakiStreamConnection *stream_connection,
+							 tkproto_ControllerConnectionPayload_ControllerType *controller_type,
+							 uint32_t *controller_id)
+{
+	const char *variant = getenv("CHIAKI_CLOUD_CONTROLLER_VARIANT");
+	*controller_type = tkproto_ControllerConnectionPayload_ControllerType_DUALSENSE;
+	*controller_id = 1;
+
+	if(!variant || !*variant)
+		return;
+
+	bool is_ds4 = strncmp(variant, "ds4", 3) == 0 || strncmp(variant, "dualshock4", 10) == 0;
+	bool is_ds = strncmp(variant, "ds", 2) == 0 || strncmp(variant, "dualsense", 9) == 0;
+	if(!is_ds4 && !is_ds)
+	{
+		CHIAKI_LOGW(stream_connection->log, "Unknown CHIAKI_CLOUD_CONTROLLER_VARIANT=\"%s\"; using default dualsense:1", variant);
+		return;
+	}
+
+	const char *sep = strchr(variant, ':');
+	uint32_t parsed_id = 1;
+	if(sep && *(sep + 1) != '\0')
+	{
+		char *end = NULL;
+		unsigned long n = strtoul(sep + 1, &end, 10);
+		if(end && *end == '\0' && n <= 255)
+			parsed_id = (uint32_t)n;
+		else
+			CHIAKI_LOGW(stream_connection->log, "Invalid controller id in CHIAKI_CLOUD_CONTROLLER_VARIANT=\"%s\"; using id=1", variant);
+	}
+
+	*controller_type = is_ds4
+		? tkproto_ControllerConnectionPayload_ControllerType_DUALSHOCK4
+		: tkproto_ControllerConnectionPayload_ControllerType_DUALSENSE;
+	*controller_id = parsed_id;
+}
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_init(ChiakiStreamConnection *stream_connection, ChiakiSession *session, double packet_loss_max)
 {
@@ -70,6 +115,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_init(ChiakiStreamConnecti
 	stream_connection->ecdh_secret = NULL;
 	stream_connection->gkcrypt_remote = NULL;
 	stream_connection->gkcrypt_local = NULL;
+
 	stream_connection->streaminfo_early_buf = NULL;
 	stream_connection->streaminfo_early_buf_size = 0;
 	stream_connection->player_index = 0;
@@ -125,6 +171,7 @@ CHIAKI_EXPORT void chiaki_stream_connection_fini(ChiakiStreamConnection *stream_
 	chiaki_gkcrypt_free(stream_connection->gkcrypt_local);
 
 	free(stream_connection->ecdh_secret);
+
 	if (stream_connection->congestion_control.thread.thread)
 		chiaki_congestion_control_stop(&stream_connection->congestion_control);
 
@@ -158,14 +205,23 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_run(ChiakiStreamConnectio
 		if(!takion_info.sa)
 			return CHIAKI_ERR_MEMORY;
 		memcpy(takion_info.sa, session->connect_info.host_addrinfo_selected->ai_addr, takion_info.sa_len);
-		err = set_port(takion_info.sa, htons(STREAM_CONNECTION_PORT));
+		uint16_t sc_port = (session->connect_info.cloud_direct && session->connect_info.stream_port)
+				? session->connect_info.stream_port
+				: STREAM_CONNECTION_PORT;
+		err = set_port(takion_info.sa, htons(sc_port));
 		assert(err == CHIAKI_ERR_SUCCESS);
+		if(session->connect_info.cloud_direct)
+			CHIAKI_LOGI(stream_connection->log, "Cloud-direct: Takion → %s:%u",
+				session->connect_info.hostname, (unsigned)sc_port);
 	}
 	takion_info.ip_dontfrag = session->dontfrag;
 
 	takion_info.enable_crypt = true;
 	takion_info.enable_dualsense = session->connect_info.enable_dualsense;
-	takion_info.protocol_version = chiaki_target_is_ps5(session->target) ? 12 : 9;
+	// Cloud-direct Asobi captures send 44-byte wire feedback-state packets:
+	// 1B packet type + 4B cloud prefix + 11B crypto header + 28B v12 state.
+	takion_info.protocol_version = (session->connect_info.cloud_direct || chiaki_target_is_ps5(session->target)) ? 12 : 9;
+	takion_info.cloud_direct = session->connect_info.cloud_direct;
 
 	takion_info.cb = stream_connection_takion_cb;
 	takion_info.cb_user = stream_connection;
@@ -270,8 +326,12 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_run(ChiakiStreamConnectio
 		free(stream_connection->streaminfo_early_buf);
 		stream_connection->streaminfo_early_buf = NULL;
 	}
-	if(!stream_connection->state_finished)
-		err = chiaki_cond_timedwait_pred(&stream_connection->state_cond, &stream_connection->state_mutex, EXPECT_TIMEOUT_MS, state_finished_cond_check, stream_connection);
+	{
+		uint32_t si_timeout = stream_connection->takion.cloud_direct
+			? EXPECT_STREAMINFO_TIMEOUT_MS : EXPECT_TIMEOUT_MS;
+		if(!stream_connection->state_finished)
+			err = chiaki_cond_timedwait_pred(&stream_connection->state_cond, &stream_connection->state_mutex, si_timeout, state_finished_cond_check, stream_connection);
+	}
 	assert(err == CHIAKI_ERR_SUCCESS || err == CHIAKI_ERR_TIMEOUT);
 	CHECK_STOP(disconnect);
 
@@ -423,6 +483,7 @@ static void stream_connection_takion_cb(ChiakiTakionEvent *event, void *user)
 
 static void stream_connection_takion_data(ChiakiStreamConnection *stream_connection, ChiakiTakionMessageDataType data_type, uint8_t *buf, size_t buf_size)
 {
+	CHIAKI_LOGI(stream_connection->log, "StreamConnection takion_data: data_type=%d size=%zu", (int)data_type, buf_size);
 	switch(data_type)
 	{
 		case CHIAKI_TAKION_MESSAGE_DATA_TYPE_PROTOBUF:
@@ -445,6 +506,8 @@ static void stream_connection_takion_data(ChiakiStreamConnection *stream_connect
 static void stream_connection_takion_data_protobuf(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size)
 {
 	chiaki_mutex_lock(&stream_connection->state_mutex);
+	CHIAKI_LOGI(stream_connection->log, "StreamConnection protobuf: state=%d size=%zu first_byte=0x%02x",
+		(int)stream_connection->state, buf_size, buf_size > 0 ? (unsigned)buf[0] : 0);
 	switch(stream_connection->state)
 	{
 		case STATE_EXPECT_BANG:
@@ -523,8 +586,8 @@ static void stream_connection_takion_data_pad_info(ChiakiStreamConnection *strea
 	bool haptic_intensity_changed = false;
 	bool trigger_intensity_changed = false;
 
-	CHIAKI_LOGV(stream_connection->log, "Pad info packet: ");
-	chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_VERBOSE, buf, buf_size);
+	CHIAKI_LOGI(stream_connection->log, "Pad info packet (size=%zu):", buf_size);
+	chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_INFO, buf, buf_size);
 
 	switch(buf_size)
 	{
@@ -661,6 +724,8 @@ static void stream_connection_takion_data_handle_disconnect(ChiakiStreamConnecti
 
 	reason[decode_buf.size] = '\0';
 	CHIAKI_LOGI(stream_connection->log, "Remote disconnected from StreamConnection with reason \"%s\"", reason);
+	CHIAKI_LOGI(stream_connection->log, "DISCONNECT raw payload (%zu bytes):", buf_size);
+	chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_INFO, buf, buf_size);
 
 	stream_connection->remote_disconnected = true;
 	free(stream_connection->remote_disconnect_reason);
@@ -682,8 +747,9 @@ static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_co
 		return;
 	}
 
-	CHIAKI_LOGV(stream_connection->log, "StreamConnection received data with msg.type == %d", msg.type);
-	chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_VERBOSE, buf, buf_size);
+	// Only log non-heartbeat messages to avoid flooding
+	if(msg.type != tkproto_TakionMessage_PayloadType_HEARTBEAT)
+		CHIAKI_LOGI(stream_connection->log, "StreamConnection idle msg.type=%d size=%zu", msg.type, buf_size);
 
 	switch (msg.type)
 	{
@@ -713,9 +779,236 @@ static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_co
 	case tkproto_TakionMessage_PayloadType_STREAMINFOACK:
 		CHIAKI_LOGV(stream_connection->log, "StreamConnection received streaminfo ack");
 		break;
-	default:
+	case tkproto_TakionMessage_PayloadType_HEARTBEAT:
+		CHIAKI_LOGV(stream_connection->log, "StreamConnection received heartbeat request, replying");
+		stream_connection_send_heartbeat(stream_connection);
+		break;
+	case tkproto_TakionMessage_PayloadType_SERVERMESSAGE:
+	{
+		// Parse the JSON string from the protobuf payload
+		// Layout: outer TakionMessage field19(bytes) → ServerMessagePayload field1(string)
+		// Find the JSON by scanning for '{' in the buffer
+		static int sm_count = 0;
+		sm_count++;
+		for(size_t si = 0; si + 1 < buf_size; si++)
+		{
+			if(buf[si] == '{')
+			{
+				// Print as string up to end of buffer
+				char tmp[512];
+				size_t cplen = buf_size - si;
+				if(cplen >= sizeof(tmp)) cplen = sizeof(tmp) - 1;
+				memcpy(tmp, buf + si, cplen);
+				tmp[cplen] = '\0';
+				CHIAKI_LOGI(stream_connection->log, "SERVERMESSAGE #%d: %s", sm_count, tmp);
+				// Re-send CONTROLLERCONNECTION after gameStarted so the game process sees the controller
+				if(strstr(tmp, "gameStarted"))
+				{
+					CHIAKI_LOGI(stream_connection->log, "SERVERMESSAGE: gameStarted detected, re-sending CONTROLLERCONNECTION");
+					stream_connection_send_controller_connection(stream_connection);
+				}
+				break;
+			}
+		}
 		break;
 	}
+	case tkproto_TakionMessage_PayloadType_DIRECTMESSAGE:
+	{
+		// Decode DirectMessagePayload fields via manual protobuf parse of field 29
+		uint64_t dm_type = 0xFFFF, dm_dest = 0;
+		size_t dm_data_len = 0;
+		if(msg.has_direct_message_payload)
+		{
+			dm_type = msg.direct_message_payload.direct_message_type;
+			dm_dest = msg.direct_message_payload.destination;
+			dm_data_len = 0; // data is pb_callback_t, parsed manually below
+		}
+		CHIAKI_LOGI(stream_connection->log,
+			"StreamConnection DIRECTMESSAGE dm_type=%llu dest=%llu data=%zu bytes",
+			(unsigned long long)dm_type, (unsigned long long)dm_dest, dm_data_len);
+		// Try re-key handling; if key parsing fails, handler sends a fallback response.
+		stream_connection_handle_directmessage_rekey(stream_connection, buf, buf_size);
+		break;
+	}
+	default:
+		// Log unknown message types with hexdump for first few occurrences
+		{
+			static int unknown_type_count = 0;
+			if(unknown_type_count < 3)
+			{
+				unknown_type_count++;
+				CHIAKI_LOGI(stream_connection->log, "StreamConnection unknown msg.type=%d raw hexdump (%zu bytes):", msg.type, buf_size);
+				chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_INFO, buf, buf_size < 128 ? buf_size : 128);
+			}
+		}
+		break;
+	}
+}
+
+// ── Minimal protobuf varint/field parser for DirectMessage re-key ──────────
+
+static size_t pb_read_varint(const uint8_t *buf, size_t len, uint64_t *out)
+{
+	*out = 0;
+	for(size_t i = 0; i < len && i < 10; i++)
+	{
+		*out |= (uint64_t)(buf[i] & 0x7F) << (7 * i);
+		if(!(buf[i] & 0x80))
+			return i + 1;
+	}
+	return 0; // parse error
+}
+
+static size_t pb_write_varint(uint8_t *buf, uint64_t val)
+{
+	size_t i = 0;
+	do {
+		buf[i] = val & 0x7F;
+		val >>= 7;
+		if(val)
+			buf[i] |= 0x80;
+		i++;
+	} while(val);
+	return i;
+}
+
+static void stream_connection_send_directmessage_fallback(ChiakiStreamConnection *stream_connection, uint64_t dm_type, uint64_t counter, const uint8_t *field3, size_t field3_len)
+{
+	uint8_t inner_resp[256];
+	size_t ip = 0;
+	inner_resp[ip++] = 0x08; // field 1, varint
+	ip += pb_write_varint(inner_resp + ip, dm_type);
+	inner_resp[ip++] = 0x10; // field 2, varint
+	ip += pb_write_varint(inner_resp + ip, counter);
+
+	if(field3 && field3_len > 0 && field3_len <= 200)
+	{
+		inner_resp[ip++] = 0x1a; // field 3, bytes
+		ip += pb_write_varint(inner_resp + ip, field3_len);
+		memcpy(inner_resp + ip, field3, field3_len);
+		ip += field3_len;
+	}
+
+	uint8_t outer_resp[320];
+	size_t op = 0;
+	outer_resp[op++] = 0x08; // field 1, varint
+	op += pb_write_varint(outer_resp + op, 29); // type = DIRECTMESSAGE
+	outer_resp[op++] = 0xEA;
+	outer_resp[op++] = 0x01;
+	op += pb_write_varint(outer_resp + op, ip);
+	memcpy(outer_resp + op, inner_resp, ip);
+	op += ip;
+
+	ChiakiErrorCode err = chiaki_takion_send_message_data(&stream_connection->takion, 1, 1, outer_resp, op, NULL);
+	if(err != CHIAKI_ERR_SUCCESS)
+		CHIAKI_LOGE(stream_connection->log, "DirectMessage fallback response failed");
+	else
+		CHIAKI_LOGI(stream_connection->log, "DirectMessage fallback response sent (dm_type=%llu counter=%llu, field3=%zu bytes)",
+			(unsigned long long)dm_type, (unsigned long long)counter, field3 ? field3_len : 0);
+}
+
+static void stream_connection_handle_directmessage_rekey(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size)
+{
+	if(!stream_connection->takion.cloud_direct)
+		return;
+
+	ChiakiSession *session = stream_connection->session;
+
+	// Parse outer protobuf: field 29 (wire type 2 = length-delimited) contains inner DM
+	const uint8_t *inner = NULL;
+	size_t inner_len = 0;
+	size_t pos = 0;
+	while(pos < buf_size)
+	{
+		uint64_t tag;
+		size_t n = pb_read_varint(buf + pos, buf_size - pos, &tag);
+		if(!n) break;
+		pos += n;
+
+		uint32_t field_num = (uint32_t)(tag >> 3);
+		uint32_t wire_type = (uint32_t)(tag & 0x7);
+
+		if(wire_type == 0) { // varint
+			uint64_t v;
+			n = pb_read_varint(buf + pos, buf_size - pos, &v);
+			if(!n) break;
+			pos += n;
+		} else if(wire_type == 2) { // length-delimited
+			uint64_t len;
+			n = pb_read_varint(buf + pos, buf_size - pos, &len);
+			if(!n) break;
+			pos += n;
+			if(field_num == 29 && pos + len <= buf_size)
+			{
+				inner = buf + pos;
+				inner_len = (size_t)len;
+			}
+			pos += (size_t)len;
+		} else {
+			break; // unknown wire type
+		}
+	}
+
+	if(!inner || inner_len == 0)
+	{
+		CHIAKI_LOGE(stream_connection->log, "DirectMessage re-key: couldn't find field 29");
+		stream_connection_send_directmessage_fallback(stream_connection, 2, 1001, NULL, 0);
+		return;
+	}
+
+	// Parse inner: field 1=direct_message_type, field 2=counter/destination, field 3=opaque bytes
+	uint64_t dm_type = 2;
+	uint64_t counter = 1001;
+	const uint8_t *field3 = NULL;
+	size_t field3_len = 0;
+	pos = 0;
+	while(pos < inner_len)
+	{
+		uint64_t tag;
+		size_t n = pb_read_varint(inner + pos, inner_len - pos, &tag);
+		if(!n) break;
+		pos += n;
+
+		uint32_t field_num = (uint32_t)(tag >> 3);
+		uint32_t wire_type = (uint32_t)(tag & 0x7);
+
+		if(wire_type == 0) {
+			uint64_t v;
+			n = pb_read_varint(inner + pos, inner_len - pos, &v);
+			if(!n) break;
+			pos += n;
+			if(field_num == 1)
+				dm_type = v;
+			else if(field_num == 2)
+				counter = v;
+		} else if(wire_type == 2) {
+			uint64_t len;
+			n = pb_read_varint(inner + pos, inner_len - pos, &len);
+			if(!n) break;
+			pos += n;
+			if(field_num == 3 && pos + len <= inner_len)
+			{
+				field3 = inner + pos;
+				field3_len = (size_t)len;
+			}
+			pos += (size_t)len;
+		} else {
+			break;
+		}
+	}
+
+	static int dm2_count = 0;
+	dm2_count++;
+
+	// DM2 is a server-side keep-alive/anti-bot challenge, NOT a key exchange.
+	// Pcap analysis of the working Asobi client confirms it uses the BANG-derived gkcrypt_local
+	// for ALL packets (CONTROL, FEEDBACK, CONGESTION) with a single unified key_pos_local counter.
+	// There is no separate feedback key derived from DM2. Just acknowledge and move on.
+	if(dm2_count <= 3)
+		CHIAKI_LOGI(stream_connection->log, "DM2 #%d: field3_len=%zu — acknowledging with fallback",
+			dm2_count, field3 ? field3_len : 0);
+
+	stream_connection_send_directmessage_fallback(stream_connection, dm_type, counter, field3, field3_len);
 }
 
 static ChiakiErrorCode stream_connection_init_crypt(ChiakiStreamConnection *stream_connection)
@@ -922,7 +1215,19 @@ static void stream_connection_takion_data_expect_streaminfo(ChiakiStreamConnecti
 	if(!r)
 	{
 		CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to decode data protobuf");
+		chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_ERROR, buf, buf_size > 32 ? 32 : buf_size);
 		return;
+	}
+
+	CHIAKI_LOGI(stream_connection->log, "StreamConnection expect_streaminfo: decoded msg.type=%d has_stream_info=%d",
+		(int)msg.type, (int)msg.has_stream_info_payload);
+	if(msg.has_stream_info_payload)
+	{
+		CHIAKI_LOGI(stream_connection->log, "StreamConnection STREAMINFO timeouts: start_timeout=%u afk_timeout=%u afk_timeout_disconnect=%u congestion_control_interval=%u",
+			msg.stream_info_payload.start_timeout,
+			msg.stream_info_payload.afk_timeout,
+			msg.stream_info_payload.afk_timeout_disconnect,
+			msg.stream_info_payload.congestion_control_interval);
 	}
 
 	if(msg.type != tkproto_TakionMessage_PayloadType_STREAMINFO || !msg.has_stream_info_payload)
@@ -957,7 +1262,12 @@ static void stream_connection_takion_data_expect_streaminfo(ChiakiStreamConnecti
 
 	// TODO: do some checks?
 
-	stream_connection_send_streaminfo_ack(stream_connection);
+	ChiakiErrorCode ack_err = stream_connection_send_streaminfo_ack(stream_connection);
+	if(ack_err != CHIAKI_ERR_SUCCESS)
+	{
+		CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to send streaminfo ack");
+		goto error;
+	}
 	
 	ChiakiErrorCode err = stream_connection_send_controller_connection(stream_connection);
 	if(err != CHIAKI_ERR_SUCCESS)
@@ -966,11 +1276,17 @@ static void stream_connection_takion_data_expect_streaminfo(ChiakiStreamConnecti
 		goto error;
 	}
 
-	err = stream_connection_enable_microphone(stream_connection);
-	if(err != CHIAKI_ERR_SUCCESS)
+	// Cloud-direct servers interpret a client-initiated STREAMINFO (type=13) as a protocol
+	// error, responding with "streaminfoack failure" DISCONNECT. Skip microphone setup for
+	// cloud-direct sessions — the server manages audio parameters server-side.
+	if(!stream_connection->session->connect_info.cloud_direct)
 	{
-		CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to enable microphone input");
-		goto error;
+		err = stream_connection_enable_microphone(stream_connection);
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to enable microphone input");
+			goto error;
+		}
 	}
 
 	// stream_connection->state_mutex is expected to be locked by the caller of this function
@@ -990,57 +1306,85 @@ static bool chiaki_pb_encode_zero_encrypted_key(pb_ostream_t *stream, const pb_f
 	return pb_encode_string(stream, data, sizeof(data));
 }
 
+
 #define LAUNCH_SPEC_JSON_BUF_SIZE 1024
 
 static ChiakiErrorCode stream_connection_send_big(ChiakiStreamConnection *stream_connection)
 {
 	ChiakiSession *session = stream_connection->session;
+	ChiakiErrorCode err;
 
-	ChiakiLaunchSpec launch_spec;
-	launch_spec.target = session->target;
-	launch_spec.mtu = session->mtu_in;
-	launch_spec.rtt = session->rtt_us / 1000;
-	launch_spec.handshake_key = session->handshake_key;
+	// ── Session key ────────────────────────────────────────────────────────────
+	// Cloud-direct: use the Gaikai session ID supplied by the orchestrator.
+	// Normal mode: use the session_id negotiated by the ctrl channel.
+	const char *session_key = session->connect_info.cloud_direct
+		? session->connect_info.cloud_session_id
+		: session->session_id;
 
-	launch_spec.width = session->connect_info.video_profile.width;
-	launch_spec.height = session->connect_info.video_profile.height;
-	launch_spec.max_fps = session->connect_info.video_profile.max_fps;
-	launch_spec.codec = session->connect_info.video_profile.codec;
-	launch_spec.bw_kbps_sent = session->connect_info.video_profile.bitrate;
-
+	// ── Launch spec ────────────────────────────────────────────────────────────
+	// Cloud-direct: launchSpecification from Gaikai /allocate (already base64).
+	// Normal mode: build JSON locally, encrypt with RPCrypt, then base64.
+	const char *launch_spec_b64 = NULL;
 	union
 	{
 		char json[LAUNCH_SPEC_JSON_BUF_SIZE];
 		char b64[LAUNCH_SPEC_JSON_BUF_SIZE * 2];
 	} launch_spec_buf;
-	int launch_spec_json_size = chiaki_launchspec_format(launch_spec_buf.json, sizeof(launch_spec_buf.json), &launch_spec);
-	if(launch_spec_json_size < 0)
+
+	if(session->connect_info.cloud_direct)
 	{
-		CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to format LaunchSpec json");
-		return CHIAKI_ERR_UNKNOWN;
+		launch_spec_b64 = session->connect_info.cloud_launch_spec_b64;
+		if(!launch_spec_b64 || !*launch_spec_b64)
+		{
+			CHIAKI_LOGE(stream_connection->log, "StreamConnection cloud-direct: no launchSpec available");
+			return CHIAKI_ERR_UNKNOWN;
+		}
+		CHIAKI_LOGI(stream_connection->log, "StreamConnection cloud-direct: using Gaikai launchSpec (%zu chars)", strlen(launch_spec_b64));
 	}
-	launch_spec_json_size += 1; // we also want the trailing 0
-
-	CHIAKI_LOGV(stream_connection->log, "LaunchSpec: %s", launch_spec_buf.json);
-
-	uint8_t launch_spec_json_enc[LAUNCH_SPEC_JSON_BUF_SIZE];
-	memset(launch_spec_json_enc, 0, (size_t)launch_spec_json_size);
-	ChiakiErrorCode err = chiaki_rpcrypt_encrypt(&session->rpcrypt, 0, launch_spec_json_enc, launch_spec_json_enc,
-			(size_t)launch_spec_json_size);
-	if(err != CHIAKI_ERR_SUCCESS)
+	else
 	{
-		CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to encrypt LaunchSpec");
-		return err;
+		ChiakiLaunchSpec launch_spec;
+		launch_spec.target = session->target;
+		launch_spec.mtu = session->mtu_in;
+		launch_spec.rtt = session->rtt_us / 1000;
+		launch_spec.handshake_key = session->handshake_key;
+		launch_spec.width = session->connect_info.video_profile.width;
+		launch_spec.height = session->connect_info.video_profile.height;
+		launch_spec.max_fps = session->connect_info.video_profile.max_fps;
+		launch_spec.codec = session->connect_info.video_profile.codec;
+		launch_spec.bw_kbps_sent = session->connect_info.video_profile.bitrate;
+
+		int launch_spec_json_size = chiaki_launchspec_format(launch_spec_buf.json, sizeof(launch_spec_buf.json), &launch_spec);
+		if(launch_spec_json_size < 0)
+		{
+			CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to format LaunchSpec json");
+			return CHIAKI_ERR_UNKNOWN;
+		}
+		launch_spec_json_size += 1; // include trailing NUL
+
+		CHIAKI_LOGV(stream_connection->log, "LaunchSpec: %s", launch_spec_buf.json);
+
+		uint8_t launch_spec_json_enc[LAUNCH_SPEC_JSON_BUF_SIZE];
+		memset(launch_spec_json_enc, 0, (size_t)launch_spec_json_size);
+		err = chiaki_rpcrypt_encrypt(&session->rpcrypt, 0, launch_spec_json_enc, launch_spec_json_enc,
+				(size_t)launch_spec_json_size);
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to encrypt LaunchSpec");
+			return err;
+		}
+
+		xor_bytes(launch_spec_json_enc, (uint8_t *)launch_spec_buf.json, (size_t)launch_spec_json_size);
+		err = chiaki_base64_encode(launch_spec_json_enc, (size_t)launch_spec_json_size, launch_spec_buf.b64, sizeof(launch_spec_buf.b64));
+		if(err != CHIAKI_ERR_SUCCESS)
+		{
+			CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to encode LaunchSpec as base64");
+			return err;
+		}
+		launch_spec_b64 = launch_spec_buf.b64;
 	}
 
-	xor_bytes(launch_spec_json_enc, (uint8_t *)launch_spec_buf.json, (size_t)launch_spec_json_size);
-	err = chiaki_base64_encode(launch_spec_json_enc, (size_t)launch_spec_json_size, launch_spec_buf.b64, sizeof(launch_spec_buf.b64));
-	if(err != CHIAKI_ERR_SUCCESS)
-	{
-		CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to encode LaunchSpec as base64");
-		return err;
-	}
-
+	// ── ECDH keys ──────────────────────────────────────────────────────────────
 	uint8_t ecdh_pub_key[128];
 	ChiakiPBBuf ecdh_pub_key_buf = { sizeof(ecdh_pub_key), ecdh_pub_key };
 	uint8_t ecdh_sig[32];
@@ -1055,68 +1399,153 @@ static ChiakiErrorCode stream_connection_send_big(ChiakiStreamConnection *stream
 		return err;
 	}
 
+	// ── Encrypted key ──────────────────────────────────────────────────────────
+	// Cloud-direct: AES-128-ECB(morning, morning) → 16-byte encrypted_key.
+	// Normal mode: 4 zero bytes.
+	uint8_t cloud_encrypted_key[16];
+	ChiakiPBBuf cloud_encrypted_key_buf = { sizeof(cloud_encrypted_key), cloud_encrypted_key };
+	if(session->connect_info.cloud_direct)
+	{
+		EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+		if(!ctx)
+		{
+			CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to create EVP ctx for encrypted_key");
+			return CHIAKI_ERR_UNKNOWN;
+		}
+		if(!EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), NULL, session->connect_info.morning, NULL)
+			|| !EVP_CIPHER_CTX_set_padding(ctx, 0))
+		{
+			EVP_CIPHER_CTX_free(ctx);
+			CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to init AES-ECB for encrypted_key");
+			return CHIAKI_ERR_UNKNOWN;
+		}
+		int outl = 0;
+		if(!EVP_EncryptUpdate(ctx, cloud_encrypted_key, &outl, session->connect_info.morning, 16))
+		{
+			EVP_CIPHER_CTX_free(ctx);
+			CHIAKI_LOGE(stream_connection->log, "StreamConnection AES-ECB encrypt for encrypted_key failed");
+			return CHIAKI_ERR_UNKNOWN;
+		}
+		EVP_CIPHER_CTX_free(ctx);
+		CHIAKI_LOGI(stream_connection->log, "StreamConnection cloud-direct: computed AES-ECB encrypted_key");
+	}
+
+	// ── Assemble protobuf message ───────────────────────────────────────────────
 	tkproto_TakionMessage msg;
 	memset(&msg, 0, sizeof(msg));
 
 	msg.type = tkproto_TakionMessage_PayloadType_BIG;
 	msg.has_big_payload = true;
 	msg.big_payload.client_version = stream_connection->takion.version;
-	msg.big_payload.session_key.arg = session->session_id;
+	msg.big_payload.session_key.arg = (void *)session_key;
 	msg.big_payload.session_key.funcs.encode = chiaki_pb_encode_string;
-	msg.big_payload.launch_spec.arg = launch_spec_buf.b64;
+	msg.big_payload.launch_spec.arg = (void *)launch_spec_b64;
 	msg.big_payload.launch_spec.funcs.encode = chiaki_pb_encode_string;
-	msg.big_payload.encrypted_key.funcs.encode = chiaki_pb_encode_zero_encrypted_key;
+	if(session->connect_info.cloud_direct)
+	{
+		msg.big_payload.encrypted_key.arg = &cloud_encrypted_key_buf;
+		msg.big_payload.encrypted_key.funcs.encode = chiaki_pb_encode_buf;
+	}
+	else
+	{
+		msg.big_payload.encrypted_key.funcs.encode = chiaki_pb_encode_zero_encrypted_key;
+	}
 	msg.big_payload.ecdh_pub_key.arg = &ecdh_pub_key_buf;
 	msg.big_payload.ecdh_pub_key.funcs.encode = chiaki_pb_encode_buf;
 	msg.big_payload.ecdh_sig.arg = &ecdh_sig_buf;
 	msg.big_payload.ecdh_sig.funcs.encode = chiaki_pb_encode_buf;
 
-	uint8_t buf[2048];
-	size_t buf_size;
+	// ── Encode protobuf ────────────────────────────────────────────────────────
+	// Use a dynamic buffer: cloud launchSpec can be 6KB+, total ~8-10 KB.
+	size_t pb_buf_size = 32768;
+	uint8_t *pb_buf = malloc(pb_buf_size);
+	if(!pb_buf)
+	{
+		CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to allocate protobuf buffer");
+		return CHIAKI_ERR_MEMORY;
+	}
 
-	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
+	pb_ostream_t stream = pb_ostream_from_buffer(pb_buf, pb_buf_size);
 	bool pbr = pb_encode(&stream, tkproto_TakionMessage_fields, &msg);
 	if(!pbr)
 	{
+		free(pb_buf);
 		CHIAKI_LOGE(stream_connection->log, "StreamConnection big protobuf encoding failed");
 		return CHIAKI_ERR_UNKNOWN;
 	}
 
-	int32_t total_size = stream.bytes_written;
+	int32_t total_size = (int32_t)stream.bytes_written;
 	uint32_t mtu = (session->mtu_in < session->mtu_out) ? session->mtu_in : session->mtu_out;
 	// Take into account overhead of network
 	mtu -= 50;
 	uint32_t buf_pos = 0;
 	bool first = true;
-	while((mtu < total_size + 26) || (mtu < total_size + 25 && !first))
+	size_t buf_size;
+	while((mtu < (uint32_t)(total_size + 26)) || (mtu < (uint32_t)(total_size + 25) && !first))
 	{
 		if(first)
 		{
 			buf_size = mtu - 26;
-			err = chiaki_takion_send_message_data(&stream_connection->takion, 0, 1, buf + buf_pos, buf_size, NULL);
+			err = chiaki_takion_send_message_data(&stream_connection->takion, 0, 1, pb_buf + buf_pos, buf_size, NULL);
 			first = false;
 		}
 		else
 		{
 			buf_size = mtu - 25;
-			err = chiaki_takion_send_message_data_cont(&stream_connection->takion, 0, 1, buf + buf_pos, buf_size, NULL);
+			err = chiaki_takion_send_message_data_cont(&stream_connection->takion, 0, 1, pb_buf + buf_pos, buf_size, NULL);
 		}
 		buf_pos += buf_size;
-		total_size -= buf_size;
+		total_size -= (int32_t)buf_size;
 	}
 	if(total_size > 0)
 	{
 		if(first)
-		  err = chiaki_takion_send_message_data(&stream_connection->takion, 1, 1, buf + buf_pos, total_size, NULL);
+			err = chiaki_takion_send_message_data(&stream_connection->takion, 1, 1, pb_buf + buf_pos, total_size, NULL);
 		else
-		  err = chiaki_takion_send_message_data_cont(&stream_connection->takion, 1, 1, buf + buf_pos, total_size, NULL);
+			err = chiaki_takion_send_message_data_cont(&stream_connection->takion, 1, 1, pb_buf + buf_pos, total_size, NULL);
 	}
+	free(pb_buf);
 	return err;
 }
 
 static ChiakiErrorCode stream_connection_send_controller_connection(ChiakiStreamConnection *stream_connection)
 {
 	ChiakiSession *session = stream_connection->session;
+
+	if(session->connect_info.cloud_direct)
+	{
+		tkproto_ControllerConnectionPayload_ControllerType controller_type;
+		uint32_t controller_id;
+		stream_connection_cloud_controller_variant_from_env(stream_connection, &controller_type, &controller_id);
+
+		tkproto_TakionMessage cloud_msg;
+		memset(&cloud_msg, 0, sizeof(cloud_msg));
+		cloud_msg.type = tkproto_TakionMessage_PayloadType_CONTROLLERCONNECTION;
+		cloud_msg.has_controller_connection_payload = true;
+		cloud_msg.controller_connection_payload.has_connected = true;
+		cloud_msg.controller_connection_payload.connected = true;
+		cloud_msg.controller_connection_payload.has_controller_id = true;
+		cloud_msg.controller_connection_payload.controller_id = controller_id;
+		cloud_msg.controller_connection_payload.has_controller_type = true;
+		cloud_msg.controller_connection_payload.controller_type = controller_type;
+
+		uint8_t cloud_buf[256];
+		pb_ostream_t cloud_stream = pb_ostream_from_buffer(cloud_buf, sizeof(cloud_buf));
+		bool cloud_ok = pb_encode(&cloud_stream, tkproto_TakionMessage_fields, &cloud_msg);
+		if(!cloud_ok)
+		{
+			CHIAKI_LOGE(stream_connection->log, "StreamConnection controller connection protobuf encoding failed (cloud-direct)");
+			return CHIAKI_ERR_UNKNOWN;
+		}
+
+		const char *type_name = controller_type == tkproto_ControllerConnectionPayload_ControllerType_DUALSHOCK4 ? "DUALSHOCK4" : "DUALSENSE";
+		CHIAKI_LOGI(stream_connection->log,
+			"StreamConnection sending CONTROLLERCONNECTION cloud-direct (%s id=%" PRIu32 ", %zu bytes):",
+			type_name, controller_id, cloud_stream.bytes_written);
+		chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_INFO, cloud_buf, cloud_stream.bytes_written);
+		return chiaki_takion_send_message_data(&stream_connection->takion, 1, 1, cloud_buf, cloud_stream.bytes_written, NULL);
+	}
+
 	tkproto_TakionMessage msg;
 	memset(&msg, 0, sizeof(msg));
 
@@ -1124,7 +1553,8 @@ static ChiakiErrorCode stream_connection_send_controller_connection(ChiakiStream
 	msg.has_controller_connection_payload = true;
 	msg.controller_connection_payload.has_connected = true;
 	msg.controller_connection_payload.connected = true;
-	msg.controller_connection_payload.has_controller_id = false;
+	msg.controller_connection_payload.has_controller_id = true;
+	msg.controller_connection_payload.controller_id = 1;
 	msg.controller_connection_payload.has_controller_type = true;
 	msg.controller_connection_payload.controller_type = session->connect_info.enable_dualsense
 		? tkproto_ControllerConnectionPayload_ControllerType_DUALSENSE
@@ -1142,6 +1572,8 @@ static ChiakiErrorCode stream_connection_send_controller_connection(ChiakiStream
 	}
 
 	buf_size = stream.bytes_written;
+	CHIAKI_LOGI(stream_connection->log, "StreamConnection sending CONTROLLERCONNECTION (%zu bytes):", buf_size);
+	chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_INFO, buf, buf_size);
 	return chiaki_takion_send_message_data(&stream_connection->takion, 1, 1, buf, buf_size, NULL);
 }
 
@@ -1198,7 +1630,23 @@ static ChiakiErrorCode stream_connection_send_streaminfo_ack(ChiakiStreamConnect
 	}
 
 	buf_size = stream.bytes_written;
-	return chiaki_takion_send_message_data(&stream_connection->takion, 1, 9, buf, buf_size, NULL);
+	// Cloud servers are inconsistent about STREAMINFOACK channel routing.
+	// Try the observed cloud channel first (9), then legacy control channel (1).
+	// Use FLAG_B|FLAG_E (0x03): STREAMINFOACK is always a single complete DATA fragment.
+	ChiakiErrorCode err = chiaki_takion_send_message_data(&stream_connection->takion, 3, 9, buf, buf_size, NULL);
+	if(err == CHIAKI_ERR_SUCCESS)
+	{
+		CHIAKI_LOGI(stream_connection->log, "StreamConnection sent STREAMINFOACK on ch=9 flags=0x03");
+		return CHIAKI_ERR_SUCCESS;
+	}
+
+	CHIAKI_LOGW(stream_connection->log, "StreamConnection STREAMINFOACK ch=9 failed, retrying on ch=1");
+	err = chiaki_takion_send_message_data(&stream_connection->takion, 3, 1, buf, buf_size, NULL);
+	if(err == CHIAKI_ERR_SUCCESS)
+	{
+		CHIAKI_LOGI(stream_connection->log, "StreamConnection sent STREAMINFOACK on ch=1 flags=0x03");
+	}
+	return err;
 }
 
 static ChiakiErrorCode stream_connection_send_disconnect(ChiakiStreamConnection *stream_connection)
