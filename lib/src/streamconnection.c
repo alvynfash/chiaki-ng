@@ -58,7 +58,6 @@ static void stream_connection_takion_data_rumble(ChiakiStreamConnection *stream_
 static void stream_connection_takion_data_pad_info(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
 static void stream_connection_takion_data_trigger_effects(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
 static ChiakiErrorCode stream_connection_send_big(ChiakiStreamConnection *stream_connection);
-static ChiakiErrorCode stream_connection_send_controller_connection(ChiakiStreamConnection *stream_connection);
 static ChiakiErrorCode stream_connection_enable_microphone(ChiakiStreamConnection *stream_connection);
 static ChiakiErrorCode stream_connection_send_disconnect(ChiakiStreamConnection *stream_connection);
 static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
@@ -68,14 +67,17 @@ static void stream_connection_takion_data_expect_streaminfo(ChiakiStreamConnecti
 static ChiakiErrorCode stream_connection_send_streaminfo_ack(ChiakiStreamConnection *stream_connection);
 static void stream_connection_takion_av(ChiakiStreamConnection *stream_connection, ChiakiTakionAVPacket *packet);
 static ChiakiErrorCode stream_connection_send_heartbeat(ChiakiStreamConnection *stream_connection);
+static void stream_connection_handle_cloud_msg35(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size);
 
 static void stream_connection_cloud_controller_variant_from_env(ChiakiStreamConnection *stream_connection,
-							 tkproto_ControllerConnectionPayload_ControllerType *controller_type,
-							 uint32_t *controller_id)
+								 tkproto_ControllerConnectionPayload_ControllerType *controller_type,
+								 uint32_t *controller_id)
 {
 	const char *variant = getenv("CHIAKI_CLOUD_CONTROLLER_VARIANT");
-	*controller_type = tkproto_ControllerConnectionPayload_ControllerType_DUALSENSE;
-	*controller_id = 1;
+	*controller_type = stream_connection->session->connect_info.enable_dualsense
+		? tkproto_ControllerConnectionPayload_ControllerType_DUALSENSE
+		: tkproto_ControllerConnectionPayload_ControllerType_DUALSHOCK4;
+	*controller_id = stream_connection->session->connect_info.enable_dualsense ? 1 : 0;
 
 	if(!variant || !*variant)
 		return;
@@ -84,12 +86,12 @@ static void stream_connection_cloud_controller_variant_from_env(ChiakiStreamConn
 	bool is_ds = strncmp(variant, "ds", 2) == 0 || strncmp(variant, "dualsense", 9) == 0;
 	if(!is_ds4 && !is_ds)
 	{
-		CHIAKI_LOGW(stream_connection->log, "Unknown CHIAKI_CLOUD_CONTROLLER_VARIANT=\"%s\"; using default dualsense:1", variant);
+		CHIAKI_LOGW(stream_connection->log, "Unknown CHIAKI_CLOUD_CONTROLLER_VARIANT=\"%s\"; using default controller type/id", variant);
 		return;
 	}
 
 	const char *sep = strchr(variant, ':');
-	uint32_t parsed_id = 1;
+	uint32_t parsed_id = is_ds4 ? 0 : 1;
 	if(sep && *(sep + 1) != '\0')
 	{
 		char *end = NULL;
@@ -97,7 +99,7 @@ static void stream_connection_cloud_controller_variant_from_env(ChiakiStreamConn
 		if(end && *end == '\0' && n <= 255)
 			parsed_id = (uint32_t)n;
 		else
-			CHIAKI_LOGW(stream_connection->log, "Invalid controller id in CHIAKI_CLOUD_CONTROLLER_VARIANT=\"%s\"; using id=1", variant);
+			CHIAKI_LOGW(stream_connection->log, "Invalid controller id in CHIAKI_CLOUD_CONTROLLER_VARIANT=\"%s\"; using default id for controller type", variant);
 	}
 
 	*controller_type = is_ds4
@@ -751,6 +753,12 @@ static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_co
 	if(msg.type != tkproto_TakionMessage_PayloadType_HEARTBEAT)
 		CHIAKI_LOGI(stream_connection->log, "StreamConnection idle msg.type=%d size=%zu", msg.type, buf_size);
 
+	if(msg.type == 35)
+	{
+		stream_connection_handle_cloud_msg35(stream_connection, buf, buf_size);
+		return;
+	}
+
 	switch (msg.type)
 	{
 	case tkproto_TakionMessage_PayloadType_DISCONNECT:
@@ -805,15 +813,15 @@ static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_co
 				if(strstr(tmp, "gameStarted"))
 				{
 					CHIAKI_LOGI(stream_connection->log, "SERVERMESSAGE: gameStarted detected, re-sending CONTROLLERCONNECTION");
-					stream_connection_send_controller_connection(stream_connection);
+					chiaki_stream_connection_send_controller_connection(stream_connection);
 				}
 				break;
 			}
 		}
 		break;
 	}
-	case tkproto_TakionMessage_PayloadType_DIRECTMESSAGE:
-	{
+		case tkproto_TakionMessage_PayloadType_DIRECTMESSAGE:
+		{
 		// Decode DirectMessagePayload fields via manual protobuf parse of field 29
 		uint64_t dm_type = 0xFFFF, dm_dest = 0;
 		size_t dm_data_len = 0;
@@ -827,10 +835,10 @@ static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_co
 			"StreamConnection DIRECTMESSAGE dm_type=%llu dest=%llu data=%zu bytes",
 			(unsigned long long)dm_type, (unsigned long long)dm_dest, dm_data_len);
 		// Try re-key handling; if key parsing fails, handler sends a fallback response.
-		stream_connection_handle_directmessage_rekey(stream_connection, buf, buf_size);
-		break;
-	}
-	default:
+			stream_connection_handle_directmessage_rekey(stream_connection, buf, buf_size);
+			break;
+		}
+		default:
 		// Log unknown message types with hexdump for first few occurrences
 		{
 			static int unknown_type_count = 0;
@@ -870,6 +878,138 @@ static size_t pb_write_varint(uint8_t *buf, uint64_t val)
 		i++;
 	} while(val);
 	return i;
+}
+
+static void stream_connection_handle_cloud_msg35(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size)
+{
+	/* Cloud-direct extension packet observed as TakionMessage type=35.
+	 * It carries a nested payload in field 36 that looks like server-driven
+	 * stream profile telemetry (fps/resolution/codec/range). We parse
+	 * lightweight metadata for diagnostics and keep control-path unchanged. */
+	if(!stream_connection->session->connect_info.cloud_direct)
+		return;
+
+	const uint8_t *inner = NULL;
+	size_t inner_len = 0;
+	size_t pos = 0;
+	while(pos < buf_size)
+	{
+		uint64_t tag = 0;
+		size_t n = pb_read_varint(buf + pos, buf_size - pos, &tag);
+		if(!n)
+			break;
+		pos += n;
+		uint32_t field_num = (uint32_t)(tag >> 3);
+		uint32_t wire_type = (uint32_t)(tag & 0x07);
+		if(wire_type == 0)
+		{
+			uint64_t v = 0;
+			n = pb_read_varint(buf + pos, buf_size - pos, &v);
+			if(!n)
+				break;
+			pos += n;
+		}
+		else if(wire_type == 2)
+		{
+			uint64_t l = 0;
+			n = pb_read_varint(buf + pos, buf_size - pos, &l);
+			if(!n || pos + n + (size_t)l > buf_size)
+				break;
+			pos += n;
+			if(field_num == 36)
+			{
+				inner = buf + pos;
+				inner_len = (size_t)l;
+				break;
+			}
+			pos += (size_t)l;
+		}
+		else if(wire_type == 5)
+		{
+			if(pos + 4 > buf_size)
+				break;
+			pos += 4;
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	if(!inner || inner_len == 0)
+		return;
+
+	uint64_t fps = 0, width = 0, height = 0;
+	char range[16] = {0};
+	char codec[16] = {0};
+	bool have_fps = false, have_width = false, have_height = false, have_range = false, have_codec = false;
+
+	size_t ip = 0;
+	while(ip < inner_len)
+	{
+		uint64_t tag = 0;
+		size_t n = pb_read_varint(inner + ip, inner_len - ip, &tag);
+		if(!n)
+			break;
+		ip += n;
+		uint32_t field_num = (uint32_t)(tag >> 3);
+		uint32_t wire_type = (uint32_t)(tag & 0x07);
+
+		if(wire_type == 0)
+		{
+			uint64_t v = 0;
+			n = pb_read_varint(inner + ip, inner_len - ip, &v);
+			if(!n)
+				break;
+			ip += n;
+			if(field_num == 3) { fps = v; have_fps = true; }
+			else if(field_num == 11) { width = v; have_width = true; }
+			else if(field_num == 12) { height = v; have_height = true; }
+		}
+		else if(wire_type == 2)
+		{
+			uint64_t l = 0;
+			n = pb_read_varint(inner + ip, inner_len - ip, &l);
+			if(!n || ip + n + (size_t)l > inner_len)
+				break;
+			ip += n;
+			const uint8_t *p = inner + ip;
+			size_t plen = (size_t)l;
+			if(field_num == 9 && plen > 0)
+			{
+				size_t cplen = plen < sizeof(range) - 1 ? plen : sizeof(range) - 1;
+				memcpy(range, p, cplen);
+				range[cplen] = '\0';
+				have_range = true;
+			}
+			else if(field_num == 10 && plen > 0)
+			{
+				size_t cplen = plen < sizeof(codec) - 1 ? plen : sizeof(codec) - 1;
+				memcpy(codec, p, cplen);
+				codec[cplen] = '\0';
+				have_codec = true;
+			}
+			ip += plen;
+		}
+		else if(wire_type == 5)
+		{
+			if(ip + 4 > inner_len)
+				break;
+			ip += 4;
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	CHIAKI_LOGV(stream_connection->log,
+		"StreamConnection cloud msg.type=35 profile_update fps=%s%llu res=%s%llux%s%llu codec=%s%s range=%s%s",
+		have_fps ? "" : "?", (unsigned long long)fps,
+		have_width ? "" : "?", (unsigned long long)width,
+		have_height ? "" : "?", (unsigned long long)height,
+		have_codec ? "" : "?", have_codec ? codec : "",
+		have_range ? "" : "?", have_range ? range : "");
 }
 
 static void stream_connection_send_directmessage_fallback(ChiakiStreamConnection *stream_connection, uint64_t dm_type, uint64_t counter, const uint8_t *field3, size_t field3_len)
@@ -1269,7 +1409,7 @@ static void stream_connection_takion_data_expect_streaminfo(ChiakiStreamConnecti
 		goto error;
 	}
 	
-	ChiakiErrorCode err = stream_connection_send_controller_connection(stream_connection);
+	ChiakiErrorCode err = chiaki_stream_connection_send_controller_connection(stream_connection);
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
 		CHIAKI_LOGE(stream_connection->log, "StreamConnection failed to send controller connection");
@@ -1508,7 +1648,7 @@ static ChiakiErrorCode stream_connection_send_big(ChiakiStreamConnection *stream
 	return err;
 }
 
-static ChiakiErrorCode stream_connection_send_controller_connection(ChiakiStreamConnection *stream_connection)
+CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_send_controller_connection(ChiakiStreamConnection *stream_connection)
 {
 	ChiakiSession *session = stream_connection->session;
 
@@ -1517,6 +1657,9 @@ static ChiakiErrorCode stream_connection_send_controller_connection(ChiakiStream
 		tkproto_ControllerConnectionPayload_ControllerType controller_type;
 		uint32_t controller_id;
 		stream_connection_cloud_controller_variant_from_env(stream_connection, &controller_type, &controller_id);
+		CHIAKI_LOGI(stream_connection->log,
+			"StreamConnection cloud-direct controller default from connect_info.enable_dualsense=%d",
+			session->connect_info.enable_dualsense ? 1 : 0);
 
 		tkproto_TakionMessage cloud_msg;
 		memset(&cloud_msg, 0, sizeof(cloud_msg));

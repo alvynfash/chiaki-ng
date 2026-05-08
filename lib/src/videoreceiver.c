@@ -54,6 +54,7 @@ CHIAKI_EXPORT void chiaki_video_receiver_init(ChiakiVideoReceiver *video_receive
 	chiaki_bitstream_init(&video_receiver->bitstream, video_receiver->log, video_receiver->session->connect_info.video_profile.codec);
 	chiaki_mutex_init(&video_receiver->waiting_for_idr_mutex, false);
 	video_receiver->waiting_for_idr = false;
+	video_receiver->waiting_for_idr_skipped_frames = 0;
 	chiaki_mutex_init(&video_receiver->frames_lost_mutex, false);
 }
 
@@ -70,6 +71,8 @@ CHIAKI_EXPORT void chiaki_video_receiver_set_waiting_for_idr(ChiakiVideoReceiver
 {
 	chiaki_mutex_lock(&video_receiver->waiting_for_idr_mutex);
 	video_receiver->waiting_for_idr = waiting_for_idr;
+	if(!waiting_for_idr)
+		video_receiver->waiting_for_idr_skipped_frames = 0;
 	chiaki_mutex_unlock(&video_receiver->waiting_for_idr_mutex);
 }
 
@@ -255,6 +258,24 @@ static ChiakiErrorCode chiaki_video_receiver_flush_frame(ChiakiVideoReceiver *vi
 			}
 			else
 			{
+				chiaki_mutex_lock(&video_receiver->waiting_for_idr_mutex);
+				video_receiver->waiting_for_idr_skipped_frames++;
+				uint32_t skipped = video_receiver->waiting_for_idr_skipped_frames;
+				chiaki_mutex_unlock(&video_receiver->waiting_for_idr_mutex);
+				if(video_receiver->session->connect_info.enable_idr_on_fec_failure
+					&& (skipped == 1u || (skipped % 10u) == 0u))
+				{
+					ChiakiErrorCode idr_err = stream_connection_send_idr_request(&video_receiver->session->stream_connection);
+					if(idr_err == CHIAKI_ERR_SUCCESS)
+					{
+						if(skipped == 1u)
+							CHIAKI_LOGI(video_receiver->log, "Still waiting for IDR after %u skipped P-frames, requested IDR", skipped);
+						else
+							CHIAKI_LOGV(video_receiver->log, "Still waiting for IDR after %u skipped P-frames, requested IDR", skipped);
+					}
+					else
+						CHIAKI_LOGW(video_receiver->log, "Still waiting for IDR after %u skipped P-frames, IDR request failed: %s", skipped, chiaki_error_string(idr_err));
+				}
 				CHIAKI_LOGV(video_receiver->log, "Skipping P-frame %d while waiting for IDR", (int)video_receiver->frame_index_cur);
 				video_receiver->frame_index_prev = video_receiver->frame_index_cur;
 				return CHIAKI_ERR_SUCCESS;
@@ -287,6 +308,23 @@ static ChiakiErrorCode chiaki_video_receiver_flush_frame(ChiakiVideoReceiver *vi
 					video_receiver->frames_lost_total++;
 					chiaki_mutex_unlock(&video_receiver->frames_lost_mutex);
 					CHIAKI_LOGW(video_receiver->log, "Missing reference frame %d for decoding frame %d", (int)ref_frame_index, (int)video_receiver->frame_index_cur);
+					if(video_receiver->session->connect_info.enable_idr_on_fec_failure)
+					{
+						bool waiting_for_idr = chiaki_video_receiver_get_waiting_for_idr(video_receiver);
+						if(!waiting_for_idr)
+						{
+							ChiakiErrorCode idr_err = stream_connection_send_idr_request(&video_receiver->session->stream_connection);
+							if(idr_err == CHIAKI_ERR_SUCCESS)
+							{
+								chiaki_video_receiver_set_waiting_for_idr(video_receiver, true);
+								CHIAKI_LOGI(video_receiver->log, "Missing reference decode failure, requested IDR");
+							}
+							else
+							{
+								CHIAKI_LOGW(video_receiver->log, "Missing reference decode failure and IDR request failed: %s", chiaki_error_string(idr_err));
+							}
+						}
+					}
 				}
 			}
 		}

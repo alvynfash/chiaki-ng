@@ -42,7 +42,8 @@ set(HEADER_FILES
 		include/chiaki/bitstream.h
 		include/chiaki/remote/holepunch.h
 		include/chiaki/remote/rudp.h
-		include/chiaki/remote/rudpsendbuffer.h)
+		include/chiaki/remote/rudpsendbuffer.h
+		include/chiaki/headless.h)
 
 set(SOURCE_FILES
 		src/common.c
@@ -85,6 +86,7 @@ set(SOURCE_FILES
 		src/opusencoder.c
 		src/orientation.c
 		src/bitstream.c
+		src/headless.c
 		src/remote/holepunch.c
 		src/remote/rudp.c
 		src/remote/rudpsendbuffer.c)
@@ -207,6 +209,10 @@ endif()
 if(CHIAKI_LIB_ENABLE_OPUS)
 	target_link_libraries(chiaki-lib ${Opus_LIBRARIES})
 endif()
+
+add_library(chiaki-core-headless INTERFACE)
+target_link_libraries(chiaki-core-headless INTERFACE chiaki-lib)
+target_include_directories(chiaki-core-headless INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/include")
 
 #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fanalyzer")
 if(CHIAKI_ENABLE_TESTS)

@@ -13,6 +13,7 @@ extern MunitTest tests_takion[];
 extern MunitTest tests_fec[];
 extern MunitTest tests_regist[];
 extern MunitTest tests_bitstream[];
+extern MunitTest tests_headless[];
 #if CHIAKI_LIB_ENABLE_FFMPEG_DECODER
 extern MunitTest tests_ffmpegdecoder[];
 #endif
@@ -77,6 +78,13 @@ static MunitSuite suites[] = {
 	{
 		"/regist",
 		tests_regist,
+		NULL,
+		1,
+		MUNIT_SUITE_OPTION_NONE
+	},
+	{
+		"/headless",
+		tests_headless,
 		NULL,
 		1,
 		MUNIT_SUITE_OPTION_NONE

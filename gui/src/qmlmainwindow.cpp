@@ -7578,8 +7578,12 @@ bool QmlMainWindow::event(QEvent *event)
     case QEvent::Expose:
         if (isExposed())
             updateSwapchain();
-        else if (!session)
-            QMetaObject::invokeMethod(quick_render, std::bind(&QmlMainWindow::destroySwapchain, this), Qt::BlockingQueuedConnection);
+        else if (!session) {
+            if (quick_render->thread() == QThread::currentThread())
+                destroySwapchain();
+            else
+                QMetaObject::invokeMethod(quick_render, std::bind(&QmlMainWindow::destroySwapchain, this), Qt::BlockingQueuedConnection);
+        }
         break;
     case QEvent::Move:
         if(!session && isWindowAdjustable())

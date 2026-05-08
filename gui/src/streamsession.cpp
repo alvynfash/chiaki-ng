@@ -2787,16 +2787,26 @@ bool StreamSession::RequestIDR()
 
 class StreamSessionPrivate
 {
-	public:
-		static void InitAudio(StreamSession *session, uint32_t channels, uint32_t rate)
-		{
-			QMetaObject::invokeMethod(session, "InitAudio", Qt::ConnectionType::BlockingQueuedConnection, Q_ARG(unsigned int, channels), Q_ARG(unsigned int, rate));
-		}
+		public:
+			static void InitAudio(StreamSession *session, uint32_t channels, uint32_t rate)
+			{
+				if(QThread::currentThread() == session->thread())
+				{
+					session->InitAudio(channels, rate);
+					return;
+				}
+				QMetaObject::invokeMethod(session, "InitAudio", Qt::ConnectionType::BlockingQueuedConnection, Q_ARG(unsigned int, channels), Q_ARG(unsigned int, rate));
+			}
 
-		static void InitMic(StreamSession *session, uint32_t channels, uint32_t rate)
-		{
-			QMetaObject::invokeMethod(session, "InitMic", Qt::ConnectionType::BlockingQueuedConnection, Q_ARG(unsigned int, channels), Q_ARG(unsigned int, rate));
-		}
+			static void InitMic(StreamSession *session, uint32_t channels, uint32_t rate)
+			{
+				if(QThread::currentThread() == session->thread())
+				{
+					session->InitMic(channels, rate);
+					return;
+				}
+				QMetaObject::invokeMethod(session, "InitMic", Qt::ConnectionType::BlockingQueuedConnection, Q_ARG(unsigned int, channels), Q_ARG(unsigned int, rate));
+			}
 
 		static void PushAudioFrame(StreamSession *session, int16_t *buf, size_t samples_count)	{ session->PushAudioFrame(buf, samples_count); }
 		static void PushHapticsFrame(StreamSession *session, uint8_t *buf, size_t buf_size)	{ session->PushHapticsFrame(buf, buf_size); }
