@@ -56,6 +56,21 @@ static bool g_runtime_recovery_config_init = false;
 static const uint32_t kHeadlessExternalVideoAbiRevision = 1;
 static uint64_t g_headless_ext_video_gate_logs = 0;
 static uint64_t g_headless_ext_video_emit_logs = 0;
+static const uint32_t kDrmFormatNv12 =
+	((uint32_t)'N') |
+	((uint32_t)'V' << 8) |
+	((uint32_t)'1' << 16) |
+	((uint32_t)'2' << 24);
+static const uint32_t kDrmFormatR8 =
+	((uint32_t)'R') |
+	((uint32_t)'8' << 8) |
+	((uint32_t)' ' << 16) |
+	((uint32_t)' ' << 24);
+static const uint32_t kDrmFormatGr88 =
+	((uint32_t)'G') |
+	((uint32_t)'R' << 8) |
+	((uint32_t)'8' << 16) |
+	((uint32_t)'8' << 24);
 
 static ChiakiErrorCode headless_runtime_ensure_lock(void);
 static void headless_runtime_recovery_status_reset_locked(void);
@@ -959,32 +974,63 @@ static void headless_on_ffmpeg_frame(ChiakiFfmpegDecoder *decoder, void *user)
 			if(desc && desc->nb_layers > 0 && desc->nb_layers <= 4)
 			{
 				const AVDRMLayerDescriptor *layer = &desc->layers[0];
-				ext.drm_format = layer->format;
-				ext.plane_count = (uint8_t)layer->nb_planes;
-				if(ext.plane_count > 4)
-					ext.plane_count = 4;
-				for(uint8_t i = 0; i < ext.plane_count; i++)
+				/* Some VAAPI paths expose NV12 as two 1-plane layers (R8 + GR88)
+				 * rather than one NV12 layer. Normalize to NV12 for Flutter
+				 * media_plane import expectations. */
+				bool normalized_nv12_from_split_layers = false;
+				if(desc->nb_layers >= 2 &&
+					desc->layers[0].nb_planes >= 1 &&
+					desc->layers[1].nb_planes >= 1 &&
+					desc->layers[0].format == kDrmFormatR8 &&
+					desc->layers[1].format == kDrmFormatGr88)
 				{
-					const AVDRMPlaneDescriptor *plane = &layer->planes[i];
-					if(plane->object_index >= desc->nb_objects)
-						continue;
-					const AVDRMObjectDescriptor *obj = &desc->objects[plane->object_index];
-					ext.planes[i].fd = dup(obj->fd);
-					ext.planes[i].offset = (uint32_t)plane->offset;
-					ext.planes[i].pitch = plane->pitch;
-					ext.planes[i].modifier = obj->format_modifier;
+					ext.drm_format = kDrmFormatNv12;
+					ext.plane_count = 2;
+					for(uint8_t i = 0; i < 2; i++)
+					{
+						const AVDRMLayerDescriptor *src_layer = &desc->layers[i];
+						const AVDRMPlaneDescriptor *plane = &src_layer->planes[0];
+						if(plane->object_index >= desc->nb_objects)
+							continue;
+						const AVDRMObjectDescriptor *obj = &desc->objects[plane->object_index];
+						ext.planes[i].fd = dup(obj->fd);
+						ext.planes[i].offset = (uint32_t)plane->offset;
+						ext.planes[i].pitch = plane->pitch;
+						ext.planes[i].modifier = obj->format_modifier;
+					}
+					normalized_nv12_from_split_layers = true;
+				}
+				else
+				{
+					ext.drm_format = layer->format;
+					ext.plane_count = (uint8_t)layer->nb_planes;
+					if(ext.plane_count > 4)
+						ext.plane_count = 4;
+					for(uint8_t i = 0; i < ext.plane_count; i++)
+					{
+						const AVDRMPlaneDescriptor *plane = &layer->planes[i];
+						if(plane->object_index >= desc->nb_objects)
+							continue;
+						const AVDRMObjectDescriptor *obj = &desc->objects[plane->object_index];
+						ext.planes[i].fd = dup(obj->fd);
+						ext.planes[i].offset = (uint32_t)plane->offset;
+						ext.planes[i].pitch = plane->pitch;
+						ext.planes[i].modifier = obj->format_modifier;
+					}
 				}
 				if(g_headless_ext_video_emit_logs < 8 || g_headless_ext_video_emit_logs % 600 == 0)
 				{
 					CHIAKI_LOGI(s->log,
 						"[headless.ext] emit drm=%u planes=%u fd0=%d pitch0=%u "
-						"off0=%u mod0=%llu",
+						"off0=%u mod0=%llu layers=%u normalized_nv12=%d",
 						ext.drm_format,
 						ext.plane_count,
 						ext.planes[0].fd,
 						ext.planes[0].pitch,
 						ext.planes[0].offset,
-						(unsigned long long)ext.planes[0].modifier);
+						(unsigned long long)ext.planes[0].modifier,
+						desc->nb_layers,
+						normalized_nv12_from_split_layers ? 1 : 0);
 				}
 				g_headless_ext_video_emit_logs++;
 				external_video_frame_cb(&ext, video_frame_user);
