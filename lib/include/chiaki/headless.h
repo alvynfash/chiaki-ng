@@ -23,6 +23,7 @@ typedef enum chiaki_headless_video_format_t
 	CHIAKI_HEADLESS_VIDEO_FORMAT_NV12,
 	CHIAKI_HEADLESS_VIDEO_FORMAT_P010LE,
 	CHIAKI_HEADLESS_VIDEO_FORMAT_RGBA,
+	CHIAKI_HEADLESS_VIDEO_FORMAT_DRM_PRIME,
 } ChiakiHeadlessVideoFormat;
 
 typedef enum chiaki_headless_audio_format_t
@@ -57,6 +58,37 @@ typedef struct chiaki_headless_audio_frame_t
 	size_t data_size;
 	uint64_t monotonic_time_us;
 } ChiakiHeadlessAudioFrame;
+
+typedef enum chiaki_headless_external_video_frame_type_t
+{
+	CHIAKI_HEADLESS_EXTERNAL_VIDEO_FRAME_TYPE_NONE = 0,
+	CHIAKI_HEADLESS_EXTERNAL_VIDEO_FRAME_TYPE_DMABUF_DRM_PRIME,
+} ChiakiHeadlessExternalVideoFrameType;
+
+typedef struct chiaki_headless_dmabuf_plane_t
+{
+	/* Ephemeral per-callback FD; host should dup() if it needs to retain it
+	 * after callback return. */
+	int32_t fd;
+	uint32_t offset;
+	uint32_t pitch;
+	uint64_t modifier;
+} ChiakiHeadlessDmabufPlane;
+
+typedef struct chiaki_headless_external_video_frame_t
+{
+	ChiakiHeadlessExternalVideoFrameType type;
+	uint32_t width;
+	uint32_t height;
+	uint32_t drm_format;
+	uint8_t plane_count;
+	ChiakiHeadlessDmabufPlane planes[4];
+	double pts_seconds;
+	double duration_seconds;
+	int32_t frames_lost;
+	bool frame_recovered;
+	uint64_t monotonic_time_us;
+} ChiakiHeadlessExternalVideoFrame;
 
 typedef struct chiaki_headless_stats_t
 {
@@ -96,6 +128,7 @@ typedef struct chiaki_headless_event_t
 } ChiakiHeadlessEvent;
 
 typedef void (*ChiakiHeadlessVideoFrameCallback)(const ChiakiHeadlessVideoFrame *frame, void *user);
+typedef void (*ChiakiHeadlessExternalVideoFrameCallback)(const ChiakiHeadlessExternalVideoFrame *frame, void *user);
 typedef void (*ChiakiHeadlessAudioFrameCallback)(const ChiakiHeadlessAudioFrame *frame, void *user);
 typedef void (*ChiakiHeadlessEventCallback)(const ChiakiHeadlessEvent *event, void *user);
 typedef bool (*ChiakiHeadlessRuntimeAudioSinkStartCallback)(
@@ -114,6 +147,7 @@ typedef void (*ChiakiHeadlessRuntimeAudioSinkStopCallback)(void *user);
 typedef struct chiaki_headless_callbacks_t
 {
 	ChiakiHeadlessVideoFrameCallback video_frame_cb;
+	ChiakiHeadlessExternalVideoFrameCallback external_video_frame_cb;
 	ChiakiHeadlessAudioFrameCallback audio_frame_cb;
 	ChiakiHeadlessEventCallback event_cb;
 	void *user;
@@ -372,6 +406,10 @@ typedef struct chiaki_headless_runtime_capabilities_t
 	bool supports_runtime_recovery_core_diagnostics;
 	bool supports_runtime_recovery_core_diagnostics_compat;
 	bool supports_runtime_display_only_host_video_sink_mode;
+	size_t min_runtime_external_video_capabilities_size;
+	bool supports_runtime_external_video_capabilities;
+	bool supports_runtime_external_video_capabilities_compat;
+	bool supports_runtime_external_video_dmabuf;
 } ChiakiHeadlessRuntimeCapabilities;
 
 typedef enum chiaki_headless_runtime_recovery_action_t
@@ -531,6 +569,22 @@ typedef struct chiaki_headless_runtime_audio_sink_diagnostics_t
 	uint64_t legacy_callback_frame_count;
 	uint64_t suppressed_legacy_callback_frame_count;
 } ChiakiHeadlessRuntimeAudioSinkDiagnostics;
+
+typedef struct chiaki_headless_runtime_external_video_capabilities_t
+{
+	uint32_t api_version;
+	uint32_t abi_revision;
+	size_t min_external_video_capabilities_size;
+	bool supports_runtime_external_video_capabilities;
+	bool supports_runtime_external_video_capabilities_compat;
+	bool supports_runtime_external_video_dmabuf;
+	uint8_t dmabuf_max_planes;
+	bool dmabuf_includes_fd;
+	bool dmabuf_includes_pitch;
+	bool dmabuf_includes_offset;
+	bool dmabuf_includes_modifier;
+	bool dmabuf_includes_drm_format;
+} ChiakiHeadlessRuntimeExternalVideoCapabilities;
 
 typedef struct chiaki_headless_runtime_recovery_simulation_step_input_t
 {
@@ -1333,6 +1387,14 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_audio_sink_diagnostics
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_audio_sink_diagnostics_compat(
 	void *out_diagnostics_buf,
 	size_t out_diagnostics_size);
+CHIAKI_EXPORT size_t chiaki_headless_runtime_external_video_capabilities_size(void);
+CHIAKI_EXPORT void chiaki_headless_runtime_external_video_capabilities_init(
+	ChiakiHeadlessRuntimeExternalVideoCapabilities *capabilities);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_external_video_capabilities(
+	ChiakiHeadlessRuntimeExternalVideoCapabilities *out_capabilities);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_external_video_capabilities_compat(
+	void *out_capabilities_buf,
+	size_t out_capabilities_size);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_audio_sink_report_underrun(
 	uint64_t underrun_count);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_recovery_parity_fixture_eval(

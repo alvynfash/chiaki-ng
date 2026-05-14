@@ -11,6 +11,8 @@
 
 #if CHIAKI_LIB_ENABLE_FFMPEG_DECODER
 #include <chiaki/ffmpegdecoder.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_drm.h>
 #include <libavutil/pixfmt.h>
 #endif
 
@@ -51,6 +53,9 @@ static ChiakiHeadlessRuntimeRecoveryResult g_runtime_last_recovery_result = {0};
 static bool g_runtime_last_recovery_result_valid = false;
 static ChiakiHeadlessRuntimeRecoveryConfig g_runtime_recovery_config = {0};
 static bool g_runtime_recovery_config_init = false;
+static const uint32_t kHeadlessExternalVideoAbiRevision = 1;
+static uint64_t g_headless_ext_video_gate_logs = 0;
+static uint64_t g_headless_ext_video_emit_logs = 0;
 
 static ChiakiErrorCode headless_runtime_ensure_lock(void);
 static void headless_runtime_recovery_status_reset_locked(void);
@@ -736,6 +741,8 @@ static ChiakiHeadlessVideoFormat headless_map_pixfmt(enum AVPixelFormat fmt)
 			return CHIAKI_HEADLESS_VIDEO_FORMAT_P010LE;
 		case AV_PIX_FMT_RGBA:
 			return CHIAKI_HEADLESS_VIDEO_FORMAT_RGBA;
+		case AV_PIX_FMT_DRM_PRIME:
+			return CHIAKI_HEADLESS_VIDEO_FORMAT_DRM_PRIME;
 		default:
 			return CHIAKI_HEADLESS_VIDEO_FORMAT_UNKNOWN;
 	}
@@ -830,6 +837,7 @@ static void headless_on_ffmpeg_frame(ChiakiFfmpegDecoder *decoder, void *user)
 		bool drop_callback = s->stopping || s->stopped;
 		bool display_only_host_video_sink = s->display_only_host_video_sink;
 		ChiakiHeadlessVideoFrameCallback video_frame_cb = drop_callback ? NULL : s->callbacks.video_frame_cb;
+		ChiakiHeadlessExternalVideoFrameCallback external_video_frame_cb = drop_callback ? NULL : s->callbacks.external_video_frame_cb;
 		void *video_frame_user = s->callbacks.user;
 		s->video_frame_count++;
 		s->has_video_frame_metadata = true;
@@ -886,6 +894,111 @@ static void headless_on_ffmpeg_frame(ChiakiFfmpegDecoder *decoder, void *user)
 		if(frame.recovered)
 			s->video_decode_recovered_frames++;
 		chiaki_mutex_unlock(&s->cb_mutex);
+#if !defined(_WIN32)
+		if(g_headless_ext_video_gate_logs < 8 || g_headless_ext_video_gate_logs % 600 == 0)
+		{
+			CHIAKI_LOGI(s->log,
+				"[headless.ext] gate cb=%d displayOnly=%d format=%d w=%u h=%u",
+				external_video_frame_cb ? 1 : 0,
+				display_only_host_video_sink ? 1 : 0,
+				(int)out.format,
+				out.width,
+				out.height);
+		}
+		g_headless_ext_video_gate_logs++;
+		if(external_video_frame_cb && !display_only_host_video_sink)
+		{
+			AVFrame *drm_mapped = NULL;
+			AVFrame *drm_frame = frame.frame;
+			const AVDRMFrameDescriptor *desc = NULL;
+			/* VAAPI decode outputs AV_PIX_FMT_VAAPI frames; map them to
+			 * AV_PIX_FMT_DRM_PRIME so we can forward DMABUF planes to the
+			 * embedded external callback path. */
+			if(drm_frame->format == AV_PIX_FMT_VAAPI)
+			{
+				drm_mapped = av_frame_alloc();
+				if(drm_mapped)
+				{
+					drm_mapped->format = AV_PIX_FMT_DRM_PRIME;
+					int map_rc = av_hwframe_map(
+						drm_mapped,
+						drm_frame,
+						AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT);
+					if(map_rc == 0)
+					{
+						drm_frame = drm_mapped;
+					}
+					else
+					{
+						CHIAKI_LOGW(
+							s->log,
+							"[headless.ext] vaapi->drm map failed rc=%d",
+							map_rc);
+					}
+				}
+			}
+			if(drm_frame->format == AV_PIX_FMT_DRM_PRIME)
+				desc = (const AVDRMFrameDescriptor *)drm_frame->data[0];
+			if(!desc)
+			{
+				if(drm_mapped)
+					av_frame_free(&drm_mapped);
+				goto skip_external_emit;
+			}
+			ChiakiHeadlessExternalVideoFrame ext = {0};
+			ext.type = CHIAKI_HEADLESS_EXTERNAL_VIDEO_FRAME_TYPE_DMABUF_DRM_PRIME;
+			ext.width = out.width;
+			ext.height = out.height;
+			ext.pts_seconds = out.pts_seconds;
+			ext.duration_seconds = out.duration_seconds;
+			ext.frames_lost = out.frames_lost;
+			ext.frame_recovered = out.frame_recovered;
+			ext.monotonic_time_us = out.monotonic_time_us;
+			for(uint8_t i = 0; i < 4; i++)
+				ext.planes[i].fd = -1;
+			if(desc && desc->nb_layers > 0 && desc->nb_layers <= 4)
+			{
+				const AVDRMLayerDescriptor *layer = &desc->layers[0];
+				ext.drm_format = layer->format;
+				ext.plane_count = (uint8_t)layer->nb_planes;
+				if(ext.plane_count > 4)
+					ext.plane_count = 4;
+				for(uint8_t i = 0; i < ext.plane_count; i++)
+				{
+					const AVDRMPlaneDescriptor *plane = &layer->planes[i];
+					if(plane->object_index >= desc->nb_objects)
+						continue;
+					const AVDRMObjectDescriptor *obj = &desc->objects[plane->object_index];
+					ext.planes[i].fd = dup(obj->fd);
+					ext.planes[i].offset = (uint32_t)plane->offset;
+					ext.planes[i].pitch = plane->pitch;
+					ext.planes[i].modifier = obj->format_modifier;
+				}
+				if(g_headless_ext_video_emit_logs < 8 || g_headless_ext_video_emit_logs % 600 == 0)
+				{
+					CHIAKI_LOGI(s->log,
+						"[headless.ext] emit drm=%u planes=%u fd0=%d pitch0=%u "
+						"off0=%u mod0=%llu",
+						ext.drm_format,
+						ext.plane_count,
+						ext.planes[0].fd,
+						ext.planes[0].pitch,
+						ext.planes[0].offset,
+						(unsigned long long)ext.planes[0].modifier);
+				}
+				g_headless_ext_video_emit_logs++;
+				external_video_frame_cb(&ext, video_frame_user);
+				for(uint8_t i = 0; i < ext.plane_count; i++)
+				{
+					if(ext.planes[i].fd >= 0)
+						close(ext.planes[i].fd);
+				}
+			}
+			if(drm_mapped)
+				av_frame_free(&drm_mapped);
+		}
+skip_external_emit:
+#endif
 		if(video_frame_cb && !display_only_host_video_sink)
 			video_frame_cb(&out, video_frame_user);
 
@@ -2095,6 +2208,8 @@ CHIAKI_EXPORT void chiaki_headless_runtime_capabilities_init(
 		sizeof(ChiakiHeadlessRuntimeAudioSinkConfig);
 	capabilities->min_runtime_audio_sink_diagnostics_size =
 		sizeof(ChiakiHeadlessRuntimeAudioSinkDiagnostics);
+	capabilities->min_runtime_external_video_capabilities_size =
+		sizeof(ChiakiHeadlessRuntimeExternalVideoCapabilities);
 	capabilities->min_runtime_recovery_parity_fixture_expected_size =
 		sizeof(ChiakiHeadlessRuntimeRecoveryParityFixtureExpected);
 	capabilities->min_runtime_recovery_parity_fixture_result_size =
@@ -2209,6 +2324,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_capabilities(
 	out_capabilities->supports_runtime_recovery_core_diagnostics = true;
 	out_capabilities->supports_runtime_recovery_core_diagnostics_compat = true;
 	out_capabilities->supports_runtime_display_only_host_video_sink_mode = true;
+	out_capabilities->supports_runtime_external_video_capabilities = true;
+	out_capabilities->supports_runtime_external_video_capabilities_compat = true;
+#if !defined(_WIN32)
+	out_capabilities->supports_runtime_external_video_dmabuf = true;
+#else
+	out_capabilities->supports_runtime_external_video_dmabuf = false;
+#endif
 	return CHIAKI_ERR_SUCCESS;
 }
 
@@ -3745,6 +3867,65 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_capabilities_compat(
 
 	memset(out_capabilities_buf, 0, out_capabilities_size);
 	size_t copy_size = out_capabilities_size < sizeof(full) ? out_capabilities_size : sizeof(full);
+	memcpy(out_capabilities_buf, &full, copy_size);
+	return CHIAKI_ERR_SUCCESS;
+}
+
+CHIAKI_EXPORT size_t chiaki_headless_runtime_external_video_capabilities_size(void)
+{
+	return sizeof(ChiakiHeadlessRuntimeExternalVideoCapabilities);
+}
+
+CHIAKI_EXPORT void chiaki_headless_runtime_external_video_capabilities_init(
+	ChiakiHeadlessRuntimeExternalVideoCapabilities *capabilities)
+{
+	if(!capabilities)
+		return;
+	memset(capabilities, 0, sizeof(*capabilities));
+	capabilities->api_version = chiaki_headless_api_version();
+	capabilities->abi_revision = kHeadlessExternalVideoAbiRevision;
+	capabilities->min_external_video_capabilities_size =
+		sizeof(ChiakiHeadlessRuntimeExternalVideoCapabilities);
+	capabilities->supports_runtime_external_video_capabilities = true;
+	capabilities->supports_runtime_external_video_capabilities_compat = true;
+#if !defined(_WIN32)
+	capabilities->supports_runtime_external_video_dmabuf = true;
+#else
+	capabilities->supports_runtime_external_video_dmabuf = false;
+#endif
+	capabilities->dmabuf_max_planes = 4;
+	capabilities->dmabuf_includes_fd = true;
+	capabilities->dmabuf_includes_pitch = true;
+	capabilities->dmabuf_includes_offset = true;
+	capabilities->dmabuf_includes_modifier = true;
+	capabilities->dmabuf_includes_drm_format = true;
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_external_video_capabilities(
+	ChiakiHeadlessRuntimeExternalVideoCapabilities *out_capabilities)
+{
+	if(!out_capabilities)
+		return CHIAKI_ERR_INVALID_DATA;
+	chiaki_headless_runtime_external_video_capabilities_init(out_capabilities);
+	return CHIAKI_ERR_SUCCESS;
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_external_video_capabilities_compat(
+	void *out_capabilities_buf,
+	size_t out_capabilities_size)
+{
+	if(!out_capabilities_buf || out_capabilities_size == 0)
+		return CHIAKI_ERR_INVALID_DATA;
+
+	ChiakiHeadlessRuntimeExternalVideoCapabilities full = {0};
+	ChiakiErrorCode err =
+		chiaki_headless_runtime_get_external_video_capabilities(&full);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+
+	memset(out_capabilities_buf, 0, out_capabilities_size);
+	size_t copy_size =
+		out_capabilities_size < sizeof(full) ? out_capabilities_size : sizeof(full);
 	memcpy(out_capabilities_buf, &full, copy_size);
 	return CHIAKI_ERR_SUCCESS;
 }

@@ -46,8 +46,8 @@
 #define TAKION_INBOUND_STREAMS 0x64
 
 #define TAKION_REORDER_QUEUE_SIZE_EXP 4 // => 16 entries
-#define TAKION_AV_VIDEO_REORDER_QUEUE_SIZE_EXP 6 // => 64 entries
-#define TAKION_AV_REORDER_TIMEOUT_US 16000 // ~1 frame at 60fps
+#define TAKION_AV_VIDEO_REORDER_QUEUE_SIZE_EXP 5 // => 32 entries (low-latency, but less burst-fragile)
+#define TAKION_AV_REORDER_TIMEOUT_US 8000 // balanced gap skip window for jitter/loss
 #define TAKION_SEND_BUFFER_SIZE 16
 
 #define TAKION_POSTPONE_PACKETS_SIZE 32
