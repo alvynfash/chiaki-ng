@@ -56,6 +56,8 @@ static bool g_runtime_recovery_config_init = false;
 static const uint32_t kHeadlessExternalVideoAbiRevision = 1;
 static uint64_t g_headless_ext_video_gate_logs = 0;
 static uint64_t g_headless_ext_video_emit_logs = 0;
+static uint64_t g_headless_frame_pull_empty_logs = 0;
+static uint64_t g_headless_frame_dispatch_logs = 0;
 static const uint32_t kDrmFormatNv12 =
 	((uint32_t)'N') |
 	((uint32_t)'V' << 8) |
@@ -824,7 +826,17 @@ static void headless_on_ffmpeg_frame(ChiakiFfmpegDecoder *decoder, void *user)
 		int32_t frames_lost = 0;
 		ChiakiFfmpegFrame frame = chiaki_ffmpeg_decoder_pull_frame(decoder, &frames_lost);
 		if(!frame.frame)
+		{
+			g_headless_frame_pull_empty_logs++;
+			if(g_headless_frame_pull_empty_logs <= 8 || g_headless_frame_pull_empty_logs % 600 == 0)
+			{
+				CHIAKI_LOGI(
+					s->log,
+					"[headless.frame] pull_empty count=%llu",
+					(unsigned long long)g_headless_frame_pull_empty_logs);
+			}
 			break;
+		}
 
 		/* Always drain/free decoded frames even when host did not register a
 		 * video callback, otherwise the decoder queue backs up and starts
@@ -909,6 +921,21 @@ static void headless_on_ffmpeg_frame(ChiakiFfmpegDecoder *decoder, void *user)
 		if(frame.recovered)
 			s->video_decode_recovered_frames++;
 		chiaki_mutex_unlock(&s->cb_mutex);
+		g_headless_frame_dispatch_logs++;
+		if(g_headless_frame_dispatch_logs <= 8 || g_headless_frame_dispatch_logs % 600 == 0)
+		{
+			CHIAKI_LOGI(
+				s->log,
+				"[headless.frame] dispatch idx=%llu drop=%d cb=%d ext=%d displayOnly=%d fmt=%d w=%u h=%u",
+				(unsigned long long)g_headless_frame_dispatch_logs,
+				drop_callback ? 1 : 0,
+				video_frame_cb ? 1 : 0,
+				external_video_frame_cb ? 1 : 0,
+				display_only_host_video_sink ? 1 : 0,
+				(int)out.format,
+				out.width,
+				out.height);
+		}
 #if !defined(_WIN32)
 		if(g_headless_ext_video_gate_logs < 8 || g_headless_ext_video_gate_logs % 600 == 0)
 		{

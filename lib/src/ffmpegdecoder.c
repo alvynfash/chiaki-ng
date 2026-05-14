@@ -5,6 +5,11 @@
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
 #include <math.h>
+#include <inttypes.h>
+
+static uint64_t g_ffdec_sample_count = 0;
+static uint64_t g_ffdec_pull_empty_count = 0;
+static uint64_t g_ffdec_pull_frame_count = 0;
 
 static enum AVCodecID chiaki_codec_av_codec_id(ChiakiCodec codec)
 {
@@ -157,6 +162,7 @@ CHIAKI_EXPORT void chiaki_ffmpeg_decoder_fini(ChiakiFfmpegDecoder *decoder)
 CHIAKI_EXPORT bool chiaki_ffmpeg_decoder_video_sample_cb(uint8_t *buf, size_t buf_size, int32_t frames_lost, bool frame_recovered, void *user)
 {
 	ChiakiFfmpegDecoder *decoder = user;
+	uint64_t sample_idx = ++g_ffdec_sample_count;
 
 	chiaki_mutex_lock(&decoder->mutex);
 	decoder->frames_lost += frames_lost;
@@ -218,6 +224,18 @@ CHIAKI_EXPORT bool chiaki_ffmpeg_decoder_video_sample_cb(uint8_t *buf, size_t bu
 	packet->time_base = decoder->synthetic_time_base;
 #endif
 	decoder->synthetic_packet_pts += synthetic_duration_pts;
+	if(sample_idx <= 8 || sample_idx % 600 == 0)
+	{
+		CHIAKI_LOGI(
+			decoder->log,
+			"[ffdec] sample idx=%" PRIu64 " size=%zu lost=%d recovered=%d pts=%" PRId64 " dur=%" PRId64,
+			sample_idx,
+			buf_size,
+			frames_lost,
+			frame_recovered ? 1 : 0,
+			(int64_t)packet->pts,
+			(int64_t)packet->duration);
+	}
 	int r;
 send_packet:
 	r = avcodec_send_packet(decoder->codec_context, packet);
@@ -288,6 +306,17 @@ CHIAKI_EXPORT ChiakiFfmpegFrame chiaki_ffmpeg_decoder_pull_frame(ChiakiFfmpegDec
 		{
 			if(r != AVERROR(EAGAIN))
 				CHIAKI_LOGE(decoder->log, "Decoding with FFMPEG failed");
+			if(r == AVERROR(EAGAIN))
+			{
+				g_ffdec_pull_empty_count++;
+				if(g_ffdec_pull_empty_count <= 8 || g_ffdec_pull_empty_count % 600 == 0)
+				{
+					CHIAKI_LOGI(
+						decoder->log,
+						"[ffdec] pull_empty count=%" PRIu64,
+						g_ffdec_pull_empty_count);
+				}
+			}
 			av_frame_free(&frame);
 			frame = frame_last;
 			break;
@@ -336,6 +365,17 @@ CHIAKI_EXPORT ChiakiFfmpegFrame chiaki_ffmpeg_decoder_pull_frame(ChiakiFfmpegDec
 	frame_plus_stats.recovered = recovered;
 	if(frame)
 	{
+		g_ffdec_pull_frame_count++;
+		if(g_ffdec_pull_frame_count <= 8 || g_ffdec_pull_frame_count % 600 == 0)
+		{
+			CHIAKI_LOGI(
+				decoder->log,
+				"[ffdec] pull_frame count=%" PRIu64 " fmt=%d w=%d h=%d",
+				g_ffdec_pull_frame_count,
+				frame->format,
+				frame->width,
+				frame->height);
+		}
 		chiaki_ffmpeg_frame_get_timing(
 			frame,
 			pkt_timebase,
