@@ -1,7 +1,35 @@
 # Chiaki Media Plane Embed Plan (Flutter)
 
-Last updated: 2026-05-09
-Status: E2 in progress (gated real session + diagnostics)
+Last updated: 2026-05-14
+Status: E2 in progress + Phase A external-frame ABI slice started
+
+## Current Phase Snapshot (2026-05-14, appended)
+
+Status:
+- External-frame ABI slice (A1) is in place for DRM_PRIME/dmabuf metadata + fd handoff.
+- Activation is not claimed complete yet; DeckStation-side native import/render validation is still the gating work.
+
+Decisions locked:
+- Keep existing CPU-plane callback path as compatibility fallback while A1/A2 validates.
+- Treat native-only video path as the Phase A target behavior; Dart frame bridge remains fallback/debug only.
+- Do not migrate ownership/recovery to host; Chiaki remains stream/recovery authority.
+
+## Phase A Zero-Copy Activation Matrix (next)
+
+| Matrix ID | Slice | Scope | Expected Evidence |
+| --- | --- | --- | --- |
+| `A1-C1` | ABI | external frame callback contract integrity (DRM_PRIME + dmabuf planes/fds) | struct/offset compatibility checks + stable callback invocation |
+| `A1-C2` | Runtime | fd lifecycle correctness under sustained callback load | no fd leak/regression across run window; callback return-path stability |
+| `A2-L1` | Linux import | DeckStation native dmabuf import + texture continuity | sustained frame continuity markers with native path active, no Dart frame hot path |
+| `A2-F1` | Fallback | compatibility CPU-plane fallback remains callable | explicit fallback mode succeeds without lifecycle break |
+
+## Zero-Copy Activation Acceptance Criteria (do not overstate)
+
+Zero-copy activation is considered ready only when:
+- A1 ABI/runtime checks (`A1-C1`, `A1-C2`) pass with recorded evidence.
+- Linux native dmabuf import path (`A2-L1`) passes sustained continuity validation.
+- Fallback compatibility (`A2-F1`) remains intact but is explicitly gated (not implicit hot-path fallback).
+- Documentation in this file and DeckStation tracker is updated with timestamps, toggles used, and result summary.
 
 ## Goal
 
@@ -92,6 +120,18 @@ Phase E4 (input/haptics closure):
   - does not change runtime/session/media behavior yet
 
 ## Current E2 Scaffold Progress
+
+- 2026-05-14 (Phase A / zero-copy slice A1):
+  - Added headless external video frame ABI for dmabuf/DRM_PRIME transport:
+    - `ChiakiHeadlessExternalVideoFrameType`
+    - `ChiakiHeadlessDmabufPlane`
+    - `ChiakiHeadlessExternalVideoFrame`
+    - `ChiakiHeadlessExternalVideoFrameCallback`
+    - `ChiakiHeadlessCallbacks.external_video_frame_cb`
+  - Added `CHIAKI_HEADLESS_VIDEO_FORMAT_DRM_PRIME` mapping in headless format bridge.
+  - Headless ffmpeg callback path now emits external frame metadata/fds for DRM_PRIME
+    frames (fd dup/close ownership in callback window) while preserving existing
+    CPU plane callback path as compatibility fallback.
 
 - Added typed media session bootstrap APIs:
   - `chiaki_media_session_create(...)`

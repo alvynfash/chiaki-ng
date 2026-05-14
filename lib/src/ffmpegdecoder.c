@@ -2,6 +2,7 @@
 #include <chiaki/ffmpegdecoder.h>
 #include <chiaki/time.h>
 #include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
 #include <math.h>
 
@@ -23,6 +24,24 @@ static double chiaki_ffmpeg_decoder_default_frame_duration_us(unsigned int max_f
 	if(fps <= 0.0)
 		fps = 60.0;
 	return 1000000.0 / fps;
+}
+
+static enum AVPixelFormat chiaki_ffmpeg_decoder_get_format(
+	struct AVCodecContext *codec_ctx,
+	const enum AVPixelFormat *pix_fmts)
+{
+	if(!codec_ctx || !pix_fmts)
+		return AV_PIX_FMT_NONE;
+	ChiakiFfmpegDecoder *decoder = (ChiakiFfmpegDecoder *)codec_ctx->opaque;
+	if(decoder && decoder->hw_pix_fmt != AV_PIX_FMT_NONE)
+	{
+		for(const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; p++)
+		{
+			if(*p == decoder->hw_pix_fmt)
+				return *p;
+		}
+	}
+	return pix_fmts[0];
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_ffmpeg_decoder_init(ChiakiFfmpegDecoder *decoder, ChiakiLog *log,
@@ -99,6 +118,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_ffmpeg_decoder_init(ChiakiFfmpegDecoder *de
 			goto error_codec_context;
 		}
 		decoder->codec_context->hw_device_ctx = av_buffer_ref(decoder->hw_device_ctx);
+		decoder->codec_context->opaque = decoder;
+		decoder->codec_context->get_format = chiaki_ffmpeg_decoder_get_format;
 		CHIAKI_LOGI(log, "Using hardware decoder \"%s\" with pix_fmt=%s", hw_decoder_name, av_get_pix_fmt_name(decoder->hw_pix_fmt));
 	}
 
@@ -284,6 +305,30 @@ CHIAKI_EXPORT ChiakiFfmpegFrame chiaki_ffmpeg_decoder_pull_frame(ChiakiFfmpegDec
 	AVRational pkt_timebase = decoder->codec_context->pkt_timebase;
 	AVRational ctx_timebase = decoder->codec_context->time_base;
 	AVRational framerate = decoder->codec_context->framerate;
+	/* Export VAAPI hw frames to DRM_PRIME so embedded Linux hosts can consume
+	 * DMABUF descriptors without forcing software copies. */
+	if(frame && frame->format == AV_PIX_FMT_VAAPI)
+	{
+		AVFrame *mapped = av_frame_alloc();
+		if(mapped)
+		{
+			mapped->format = AV_PIX_FMT_DRM_PRIME;
+			int map_rc = av_hwframe_map(
+				mapped,
+				frame,
+				AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_DIRECT);
+			if(map_rc == 0)
+			{
+				av_frame_free(&frame);
+				frame = mapped;
+			}
+			else
+			{
+				CHIAKI_LOGW(decoder->log, "VAAPI->DRM_PRIME map failed rc=%d", map_rc);
+				av_frame_free(&mapped);
+			}
+		}
+	}
 	chiaki_mutex_unlock(&decoder->mutex);
 
 	ChiakiFfmpegFrame frame_plus_stats = {};
