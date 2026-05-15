@@ -1728,9 +1728,9 @@ static void takion_handle_packet_message_data(ChiakiTakion *takion, uint8_t *pac
 
 static void takion_handle_packet_message_data_ack(ChiakiTakion *takion, uint8_t flags, uint8_t *buf, size_t buf_size)
 {
-	if(buf_size != 0xa && buf_size != 0xc)
+	if(buf_size != 0xa && buf_size < 0xc)
 	{
-		CHIAKI_LOGE(takion->log, "Takion received data ack with size %zx != %#x/%#x", buf_size, 0xa, 0xc);
+		CHIAKI_LOGE(takion->log, "Takion received data ack with size %zx < %#x", buf_size, 0xc);
 		return;
 	}
 
@@ -1739,10 +1739,11 @@ static void takion_handle_packet_message_data_ack(ChiakiTakion *takion, uint8_t 
 	uint16_t gap_ack_blocks_count = ntohs(*((chiaki_unaligned_uint16_t *)(buf + 8)));
 	uint16_t dup_tsns_count = buf_size >= 0xc ? ntohs(*((chiaki_unaligned_uint16_t *)(buf + 0xa))) : 0;
 
-	size_t expected_size = gap_ack_blocks_count * 4 + (buf_size >= 0xc ? 0xc : 0xa);
+	size_t expected_size = (buf_size >= 0xc ? 0xc : 0xa) + gap_ack_blocks_count * 4 + dup_tsns_count * 4;
 	if(buf_size != expected_size)
 	{
-		CHIAKI_LOGW(takion->log, "Takion received data ack with invalid gap_ack_blocks_count");
+		CHIAKI_LOGW(takion->log, "Takion received data ack with invalid block counts size=%zx expected=%zx gap_ack_blocks_count=%#x dup_tsns_count=%#x",
+				buf_size, expected_size, gap_ack_blocks_count, dup_tsns_count);
 		return;
 	}
 
