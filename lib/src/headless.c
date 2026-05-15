@@ -1204,6 +1204,9 @@ static void headless_on_session_event(ChiakiEvent *event, void *user)
 			out.type = chiaki_quit_reason_is_error(event->quit.reason) ? CHIAKI_HEADLESS_EVENT_ERROR : CHIAKI_HEADLESS_EVENT_STOPPED;
 			out.quit.reason = event->quit.reason;
 			out.quit.reason_str = event->quit.reason_str;
+			chiaki_mutex_lock(&s->cb_mutex);
+			s->stopped = true;
+			chiaki_mutex_unlock(&s->cb_mutex);
 			headless_emit_event(s, &out);
 			return;
 		case CHIAKI_EVENT_VIDEO_FEC_FAILURE:
@@ -4609,7 +4612,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_recovery_status(
 	chiaki_mutex_lock(&g_runtime_lock);
 	status.degraded_streak = g_runtime_recovery_degraded_streak;
 	status.last_idr_request_monotonic_us = g_runtime_recovery_last_idr_request_us;
-	status.runtime_session_active = g_runtime_session != NULL;
+	status.runtime_session_active = false;
+	if(g_runtime_session)
+	{
+		chiaki_mutex_lock(&g_runtime_session->cb_mutex);
+		status.runtime_session_active = !g_runtime_session->stopped;
+		chiaki_mutex_unlock(&g_runtime_session->cb_mutex);
+	}
 	chiaki_mutex_unlock(&g_runtime_lock);
 	*out_status = status;
 	return CHIAKI_ERR_SUCCESS;
