@@ -1482,6 +1482,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_send_controller_state(Chia
 		|| state->right_y;
 	if(s->session.connect_info.cloud_direct
 		&& non_idle
+		&& s->ready_event_count > 0
 		&& !s->runtime_controller_connection_refreshed_on_input)
 	{
 		s->runtime_controller_connection_refreshed_on_input = true;
