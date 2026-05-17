@@ -93,8 +93,17 @@ typedef struct chiaki_headless_external_video_frame_t
 typedef struct chiaki_headless_stats_t
 {
 	double measured_bitrate_kbps;
+	double rtt_ms;
+	double packet_loss_percent;
+	uint32_t video_width;
+	uint32_t video_height;
 	uint64_t packets_received;
 	uint64_t packets_lost;
+	uint64_t video_frame_count;
+	uint64_t audio_frame_count;
+	uint64_t video_decode_lost_frames;
+	uint64_t video_decode_recovered_frames;
+	uint64_t video_decode_gap_event_count;
 	uint64_t monotonic_time_us;
 } ChiakiHeadlessStats;
 
