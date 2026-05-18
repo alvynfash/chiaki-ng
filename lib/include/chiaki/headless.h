@@ -94,11 +94,16 @@ typedef struct chiaki_headless_stats_t
 {
 	double measured_bitrate_kbps;
 	double rtt_ms;
-	double packet_loss_percent;
+	uint32_t connection_quality_target_bitrate;
+	uint32_t connection_quality_upstream_bitrate;
+	double connection_quality_upstream_loss;
+	uint64_t connection_quality_loss_raw;
 	uint32_t video_width;
 	uint32_t video_height;
 	uint64_t packets_received;
 	uint64_t packets_lost;
+	uint64_t video_stream_bytes;
+	uint64_t video_stream_frames;
 	uint64_t video_frame_count;
 	uint64_t audio_frame_count;
 	uint64_t video_decode_lost_frames;

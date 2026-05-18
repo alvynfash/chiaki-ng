@@ -23,6 +23,8 @@ CHIAKI_EXPORT void chiaki_stream_stats_frame(ChiakiStreamStats *stats, uint64_t 
 {
 	stats->frames++;
 	stats->bytes += size;
+	stats->total_frames++;
+	stats->total_bytes += size;
 	//float br = (float)chiaki_stream_stats_bitrate(stats, 60) / 1000000.0f;
 	//CHIAKI_LOGD(NULL, "bitrate: %f", br);
 }
