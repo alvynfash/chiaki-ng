@@ -728,6 +728,15 @@ static void *headless_stats_thread(void *arg)
 		uint64_t received = 0;
 		uint64_t lost = 0;
 		chiaki_packet_stats_get(&s->session.stream_connection.packet_stats, false, &received, &lost);
+		uint64_t video_stream_bytes = 0;
+		uint64_t video_stream_frames = 0;
+		if(s->session.stream_connection.video_receiver)
+		{
+			ChiakiStreamStats *stream_stats =
+				&s->session.stream_connection.video_receiver->frame_processor.stream_stats;
+			video_stream_bytes = stream_stats->total_bytes;
+			video_stream_frames = stream_stats->total_frames;
+		}
 		chiaki_mutex_lock(&s->cb_mutex);
 		s->packets_received = received;
 		s->packets_lost = lost;
@@ -747,9 +756,18 @@ static void *headless_stats_thread(void *arg)
 		ev.stats.packets_lost = lost;
 		ev.stats.measured_bitrate_kbps = s->session.stream_connection.measured_bitrate;
 		ev.stats.rtt_ms = s->session.stream_connection.last_connection_quality_rtt_ms;
-		ev.stats.packet_loss_percent = s->session.stream_connection.last_connection_quality_loss_percent;
+		ev.stats.connection_quality_target_bitrate =
+			s->session.stream_connection.last_connection_quality_target_bitrate;
+		ev.stats.connection_quality_upstream_bitrate =
+			s->session.stream_connection.last_connection_quality_upstream_bitrate;
+		ev.stats.connection_quality_upstream_loss =
+			s->session.stream_connection.last_connection_quality_upstream_loss;
+		ev.stats.connection_quality_loss_raw =
+			s->session.stream_connection.last_connection_quality_loss_raw;
 		ev.stats.video_width = video_width;
 		ev.stats.video_height = video_height;
+		ev.stats.video_stream_bytes = video_stream_bytes;
+		ev.stats.video_stream_frames = video_stream_frames;
 		ev.stats.video_frame_count = video_frame_count;
 		ev.stats.audio_frame_count = audio_frame_count;
 		ev.stats.video_decode_lost_frames = video_decode_lost_frames;

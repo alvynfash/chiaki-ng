@@ -776,7 +776,10 @@ static void stream_connection_takion_data_idle(ChiakiStreamConnection *stream_co
 			 q.upstream_loss,
 			 q.disable_upstream_audio, q.rtt, q.loss);
 		stream_connection->last_connection_quality_rtt_ms = q.rtt;
-		stream_connection->last_connection_quality_loss_percent = q.loss;
+		stream_connection->last_connection_quality_target_bitrate = q.target_bitrate;
+		stream_connection->last_connection_quality_upstream_bitrate = q.upstream_bitrate;
+		stream_connection->last_connection_quality_upstream_loss = q.upstream_loss;
+		stream_connection->last_connection_quality_loss_raw = q.loss;
 		stream_connection->measured_bitrate = chiaki_stream_stats_bitrate(&stream_connection->video_receiver->frame_processor.stream_stats, stream_connection->session->connect_info.video_profile.max_fps) / 1000000.0;
 		CHIAKI_LOGV(stream_connection->log, "StreamConnection measured bitrate: %.4f MBit/s", stream_connection->measured_bitrate);
 		chiaki_stream_stats_reset(&stream_connection->video_receiver->frame_processor.stream_stats);

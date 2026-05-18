@@ -18,6 +18,8 @@ typedef struct chiaki_stream_stats_t
 {
 	uint64_t frames;
 	uint64_t bytes;
+	uint64_t total_frames;
+	uint64_t total_bytes;
 } ChiakiStreamStats;
 
 CHIAKI_EXPORT void chiaki_stream_stats_reset(ChiakiStreamStats *stats);
