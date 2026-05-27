@@ -127,6 +127,10 @@ class SdeckHapticsWorker;
 	bool cloud_direct;
 	/** Cloud-direct: non-standard UDP port from Gaikai /allocate (0 = default) */
 	uint16_t stream_port;
+	/** Cloud-direct: Takion protocol version override from Gaikai launch metadata. */
+	uint8_t cloud_takion_protocol_version;
+	/** Cloud-direct: PSN wrapper type override from Gaikai launch metadata. */
+	uint8_t cloud_psn_wrapper_type;
 	/** Cloud-direct: Gaikai session ID (sessionId from /allocate) used as BIG session_key */
 	QString cloud_session_id;
 	/** Cloud-direct: launchSpecification base64 string from /allocate, used as BIG launch_spec */
@@ -147,7 +151,9 @@ class SdeckHapticsWorker;
 			bool zoom,
 			bool stretch,
 			bool cloud_direct = false,
-			uint16_t stream_port = 0);
+			uint16_t stream_port = 0,
+			uint8_t cloud_takion_protocol_version = 0,
+			uint8_t cloud_psn_wrapper_type = 0);
 };
 
 struct MicBuf

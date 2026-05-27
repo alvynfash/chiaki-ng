@@ -181,8 +181,17 @@ int real_main(int argc, char *argv[])
 	QCommandLineOption cloud_session_id_option("cloud-session-id", "Cloud-direct: Gaikai session ID (sessionId from /allocate) for the BIG message.", "cloud-session-id");
 	parser.addOption(cloud_session_id_option);
 
+	QCommandLineOption cloud_launch_spec_option("cloud-launch-spec", "Cloud-direct: launchSpecification base64 string from /allocate.", "cloud-launch-spec");
+	parser.addOption(cloud_launch_spec_option);
+
 	QCommandLineOption cloud_launch_spec_file_option("cloud-launch-spec-file", "Cloud-direct: path to file containing the launchSpecification base64 string from /allocate.", "cloud-launch-spec-file");
 	parser.addOption(cloud_launch_spec_file_option);
+
+	QCommandLineOption cloud_protocol_option("cloud-protocol", "Cloud-direct: Takion protocol version override from launch metadata (for example 9).", "cloud-protocol");
+	parser.addOption(cloud_protocol_option);
+
+	QCommandLineOption cloud_wrapper_option("cloud-wrapper", "Cloud-direct: PSN wrapper type override from launch metadata (decimal or 0x-prefixed hex, for example 0x33).", "cloud-wrapper");
+	parser.addOption(cloud_wrapper_option);
 
 	parser.process(app);
 	QStringList args = parser.positionalArguments();
@@ -288,6 +297,8 @@ int real_main(int argc, char *argv[])
 		
 		bool cloud_direct = parser.isSet(cloud_port_option);
 		uint16_t stream_port = 0;
+		uint8_t cloud_protocol = 0;
+		uint8_t cloud_wrapper = 0;
 		if(cloud_direct)
 		{
 			bool ok = false;
@@ -296,6 +307,28 @@ int real_main(int argc, char *argv[])
 			{
 				printf("--cloud-port requires a valid non-zero UDP port number\n");
 				return 1;
+			}
+
+			if(parser.isSet(cloud_protocol_option))
+			{
+				uint parsed = parser.value(cloud_protocol_option).toUInt(&ok, 0);
+				if(!ok || parsed == 0 || parsed > UINT8_MAX)
+				{
+					printf("--cloud-protocol requires a valid non-zero 8-bit value\n");
+					return 1;
+				}
+				cloud_protocol = (uint8_t)parsed;
+			}
+
+			if(parser.isSet(cloud_wrapper_option))
+			{
+				uint parsed = parser.value(cloud_wrapper_option).toUInt(&ok, 0);
+				if(!ok || parsed > UINT8_MAX)
+				{
+					printf("--cloud-wrapper requires a valid 8-bit value (decimal or 0x-prefixed hex)\n");
+					return 1;
+				}
+				cloud_wrapper = (uint8_t)parsed;
 			}
 		}
 		StreamSessionConnectInfo connect_info(
@@ -312,12 +345,18 @@ int real_main(int argc, char *argv[])
 				parser.isSet(zoom_option),
 				parser.isSet(stretch_option),
 				cloud_direct,
-				stream_port);
+				stream_port,
+				cloud_protocol,
+				cloud_wrapper);
 
 		if(parser.isSet(cloud_session_id_option))
 			connect_info.cloud_session_id = parser.value(cloud_session_id_option);
 
-		if(parser.isSet(cloud_launch_spec_file_option))
+		if(parser.isSet(cloud_launch_spec_option))
+		{
+			connect_info.cloud_launch_spec_b64 = parser.value(cloud_launch_spec_option).trimmed();
+		}
+		else if(parser.isSet(cloud_launch_spec_file_option))
 		{
 			QFile spec_file(parser.value(cloud_launch_spec_file_option));
 			if(!spec_file.open(QIODevice::ReadOnly | QIODevice::Text))

@@ -273,7 +273,9 @@ StreamSessionConnectInfo::StreamSessionConnectInfo(
 		bool zoom,
 		bool stretch,
 		bool cloud_direct,
-		uint16_t stream_port)
+		uint16_t stream_port,
+		uint8_t cloud_takion_protocol_version,
+		uint8_t cloud_psn_wrapper_type)
 	: settings(settings)
 {
 	key_map = settings->GetControllerMappingForDecoding();
@@ -292,6 +294,8 @@ StreamSessionConnectInfo::StreamSessionConnectInfo(
 	// remote connection
 	else
 		video_profile = chiaki_target_is_ps5(target) ? settings->GetVideoProfileRemotePS5(): settings->GetVideoProfileRemotePS4();
+	if(cloud_direct && cloud_takion_protocol_version == 9)
+		video_profile.codec = CHIAKI_CODEC_H264;
 	this->target = target;
 	this->nickname = std::move(nickname);
 	this->host = std::move(host);
@@ -332,6 +336,8 @@ StreamSessionConnectInfo::StreamSessionConnectInfo(
 	this->auto_regist = auto_regist;
 	this->cloud_direct = cloud_direct;
 	this->stream_port = stream_port;
+	this->cloud_takion_protocol_version = cloud_takion_protocol_version;
+	this->cloud_psn_wrapper_type = cloud_psn_wrapper_type;
 	this->dpad_touch_increment = settings->GetDpadTouchEnabled() ? settings->GetDpadTouchIncrement(): 0;
 	this->dpad_touch_shortcut1 = settings->GetDpadTouchShortcut1();
 	if(this->dpad_touch_shortcut1 > 0)
@@ -483,6 +489,8 @@ StreamSession::StreamSession(const StreamSessionConnectInfo &connect_info, QObje
 	chiaki_connect_info.audio_video_disabled = connect_info.audio_video_disabled;
 	chiaki_connect_info.cloud_direct = connect_info.cloud_direct;
 	chiaki_connect_info.stream_port = connect_info.stream_port;
+	chiaki_connect_info.cloud_takion_protocol_version = connect_info.cloud_takion_protocol_version;
+	chiaki_connect_info.cloud_psn_wrapper_type = connect_info.cloud_psn_wrapper_type;
 	QByteArray cloud_session_id_utf8 = connect_info.cloud_session_id.toUtf8();
 	QByteArray cloud_launch_spec_utf8 = connect_info.cloud_launch_spec_b64.toUtf8();
 	chiaki_connect_info.cloud_session_id = cloud_session_id_utf8.isEmpty() ? NULL : cloud_session_id_utf8.constData();
