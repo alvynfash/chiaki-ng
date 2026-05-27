@@ -83,6 +83,7 @@ typedef struct chiaki_stream_connection_t
 	uint32_t last_connection_quality_upstream_bitrate;
 	double last_connection_quality_upstream_loss;
 	uint64_t last_connection_quality_loss_raw;
+	uint8_t last_big_client_version;
 } ChiakiStreamConnection;
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_init(ChiakiStreamConnection *stream_connection, ChiakiSession *session, double packet_loss_max);

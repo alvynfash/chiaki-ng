@@ -340,7 +340,9 @@ static ChiakiErrorCode headless_build_cloud_launch_from_strings(
 	ChiakiVideoResolutionPreset resolution,
 	ChiakiVideoFPSPreset fps,
 	unsigned int bitrate,
-	ChiakiCodec codec)
+	ChiakiCodec codec,
+	uint8_t takion_protocol_version,
+	uint8_t psn_wrapper_type)
 {
 	if(!out_launch || !out_morning || !out_regist_key || !morning_b64 || !regist_key_hex)
 		return CHIAKI_ERR_INVALID_DATA;
@@ -373,6 +375,8 @@ static ChiakiErrorCode headless_build_cloud_launch_from_strings(
 		.fps = fps,
 		.bitrate = bitrate,
 		.codec = codec,
+		.takion_protocol_version = takion_protocol_version,
+		.psn_wrapper_type = psn_wrapper_type,
 	};
 	return CHIAKI_ERR_SUCCESS;
 }
@@ -412,6 +416,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_connect_info_init_cloud_direct(
 	connect.enable_idr_on_fec_failure = true;
 
 	connect.cloud_direct = true;
+	connect.cloud_takion_protocol_version = launch_info->takion_protocol_version;
+	connect.cloud_psn_wrapper_type = launch_info->psn_wrapper_type;
 	connect.stream_port = launch_info->stream_port;
 	connect.cloud_session_id = launch_info->session_id;
 	connect.cloud_launch_spec_b64 = launch_info->launch_spec;
@@ -1633,7 +1639,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_probe_cloud_launch_strings(
 		resolution,
 		fps,
 		bitrate,
-		codec);
+		codec,
+		0,
+		0);
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
 
@@ -1678,7 +1686,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_probe_create_session_cloud_launch_
 		resolution,
 		fps,
 		bitrate,
-		codec);
+		codec,
+		0,
+		0);
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
 
@@ -1747,7 +1757,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_probe_start_stop_session_cloud_lau
 		resolution,
 		fps,
 		bitrate,
-		codec);
+		codec,
+		0,
+		0);
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
 
@@ -1931,6 +1943,78 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start_strings(
 	ChiakiCodec codec,
 	const char *ffmpeg_hw_decoder_name)
 {
+	return chiaki_headless_runtime_cloud_start_strings_with_protocol(
+		host,
+		stream_port,
+		session_id,
+		launch_spec,
+		morning_b64,
+		regist_key_hex,
+		ps5,
+		enable_dualsense,
+		enable_keyboard,
+		resolution,
+		fps,
+		bitrate,
+		codec,
+		0,
+		ffmpeg_hw_decoder_name);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start_strings_with_protocol(
+	const char *host,
+	uint16_t stream_port,
+	const char *session_id,
+	const char *launch_spec,
+	const char *morning_b64,
+	const char *regist_key_hex,
+	bool ps5,
+	bool enable_dualsense,
+	bool enable_keyboard,
+	ChiakiVideoResolutionPreset resolution,
+	ChiakiVideoFPSPreset fps,
+	unsigned int bitrate,
+	ChiakiCodec codec,
+	uint8_t takion_protocol_version,
+	const char *ffmpeg_hw_decoder_name)
+{
+	return chiaki_headless_runtime_cloud_start_strings_with_protocol_and_wrapper(
+		host,
+		stream_port,
+		session_id,
+		launch_spec,
+		morning_b64,
+		regist_key_hex,
+		ps5,
+		enable_dualsense,
+		enable_keyboard,
+		resolution,
+		fps,
+		bitrate,
+		codec,
+		takion_protocol_version,
+		0,
+		ffmpeg_hw_decoder_name);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start_strings_with_protocol_and_wrapper(
+	const char *host,
+	uint16_t stream_port,
+	const char *session_id,
+	const char *launch_spec,
+	const char *morning_b64,
+	const char *regist_key_hex,
+	bool ps5,
+	bool enable_dualsense,
+	bool enable_keyboard,
+	ChiakiVideoResolutionPreset resolution,
+	ChiakiVideoFPSPreset fps,
+	unsigned int bitrate,
+	ChiakiCodec codec,
+	uint8_t takion_protocol_version,
+	uint8_t psn_wrapper_type,
+	const char *ffmpeg_hw_decoder_name)
+{
 	uint8_t morning[CHIAKI_HANDSHAKE_KEY_SIZE] = {0};
 	uint8_t regist_key[CHIAKI_SESSION_AUTH_SIZE] = {0};
 	ChiakiHeadlessCloudLaunchInfo launch = {0};
@@ -1952,7 +2036,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start_strings(
 		resolution,
 		fps,
 		bitrate,
-		codec);
+		codec,
+		takion_protocol_version,
+		psn_wrapper_type);
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
 
@@ -6200,7 +6286,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_media_session_start_cloud_strings(
 		resolution,
 		fps,
 		bitrate,
-		codec);
+		codec,
+		0,
+		0);
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
 		chiaki_mutex_lock(&session->stats_mutex);

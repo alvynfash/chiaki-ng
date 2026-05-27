@@ -118,6 +118,7 @@ typedef struct chiaki_takion_connect_info_t
 	uint8_t protocol_version;
 	bool close_socket; // close socket when finishing takion
 	bool cloud_direct; // insert 4-byte prefix in client→server CONTROL packets (tak-d cloud servers)
+	uint8_t cloud_psn_wrapper_type;
 } ChiakiTakionConnectInfo;
 
 
@@ -183,6 +184,7 @@ typedef struct chiaki_takion_t
 
 	bool enable_dualsense;
 	bool cloud_direct; // insert 4-byte prefix in client→server CONTROL packets (tak-d cloud servers)
+	uint8_t cloud_psn_wrapper_type;
 } ChiakiTakion;
 
 

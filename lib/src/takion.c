@@ -60,19 +60,28 @@
 
 #define MAX_CONNECT_RESEND_TRIES 3
 
-// Cloud-direct (tak-d) prefix inserted after the packet-type byte in client→server CONTROL packets
+// Cloud-direct (tak-d) prefix inserted before the packet-type byte in client→server packets.
 #define TAKION_CLOUD_PREFIX_SIZE 4
-#define TAKION_CLOUD_PREFIX_VALUE 0x00010000u
 
-static inline void takion_write_cloud_prefix(uint8_t *buf)
+static inline void takion_write_cloud_prefix(uint8_t *buf, uint8_t psn_wrapper_type, uint8_t protocol_version)
 {
+	uint8_t wrapper = psn_wrapper_type ? psn_wrapper_type : 0x01;
 	buf[0] = 0x00;
 	buf[1] = 0x00;
-	buf[2] = 0x01;
-	buf[3] = 0x00;
+
+	if(protocol_version == 9)
+	{
+		buf[2] = 0x00;
+		buf[3] = wrapper;
+	}
+	else
+	{
+		buf[2] = wrapper;
+		buf[3] = 0x00;
+	}
 }
-// Cloud CONTROL offsets (from datagram start):
-//   0: packet type, 1-4: prefix, 5-8: tag, 9-12: GMAC, 13-16: key_pos
+// Cloud CONTROL offsets after prefix insertion (from datagram start):
+//   0-3: prefix, 4: packet type, 5-8: tag, 9-12: GMAC, 13-16: key_pos
 #define CLOUD_CTRL_GMAC_OFFSET   9
 #define CLOUD_CTRL_KEYPOS_OFFSET 13
 /**
@@ -257,8 +266,10 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 	takion->postponed_packets_count = 0;
 	takion->enable_dualsense = info->enable_dualsense;
 	takion->cloud_direct = info->cloud_direct;
+	takion->cloud_psn_wrapper_type = info->cloud_psn_wrapper_type ? info->cloud_psn_wrapper_type : 1;
 
-	CHIAKI_LOGI(takion->log, "Takion connecting (version %u)", (unsigned int)info->protocol_version);
+	CHIAKI_LOGI(takion->log, "Takion connecting (version %u, cloud_wrapper=0x%02x)",
+		(unsigned int)info->protocol_version, (unsigned)takion->cloud_psn_wrapper_type);
 	bool mac_dontfrag = true;
 
 	ChiakiErrorCode err = chiaki_stop_pipe_init(&takion->stop_pipe);
@@ -582,7 +593,7 @@ static ChiakiErrorCode takion_cloud_build_control(ChiakiTakion *takion,
 		free(std_buf);
 		return CHIAKI_ERR_MEMORY;
 	}
-	takion_write_cloud_prefix(cloud_buf);
+	takion_write_cloud_prefix(cloud_buf, takion->cloud_psn_wrapper_type, takion->version);
 	cloud_buf[TAKION_CLOUD_PREFIX_SIZE] = std_buf[0]; // type byte
 	memcpy(cloud_buf + TAKION_CLOUD_PREFIX_SIZE + 1, std_buf + 1, buf_size - 1);
 	free(std_buf);
@@ -934,7 +945,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_congestion(ChiakiTakion *takion
 		uint8_t *cloud_buf = malloc(cloud_size);
 		if(!cloud_buf)
 			return CHIAKI_ERR_MEMORY;
-		takion_write_cloud_prefix(cloud_buf);
+		takion_write_cloud_prefix(cloud_buf, takion->cloud_psn_wrapper_type, takion->version);
 		cloud_buf[TAKION_CLOUD_PREFIX_SIZE] = buf[0];
 		memcpy(cloud_buf + TAKION_CLOUD_PREFIX_SIZE + 1, buf + 1, sizeof(buf) - 1);
 		err = chiaki_takion_send_raw(takion, cloud_buf, cloud_size);
@@ -996,7 +1007,7 @@ static ChiakiErrorCode takion_send_feedback_packet(ChiakiTakion *takion, uint8_t
 		uint8_t *cloud_buf = malloc(cloud_size);
 		if(!cloud_buf)
 			return CHIAKI_ERR_MEMORY;
-		takion_write_cloud_prefix(cloud_buf);
+		takion_write_cloud_prefix(cloud_buf, takion->cloud_psn_wrapper_type, takion->version);
 		cloud_buf[TAKION_CLOUD_PREFIX_SIZE] = buf[0];
 		memcpy(cloud_buf + TAKION_CLOUD_PREFIX_SIZE + 1, buf + 1, buf_size - 1);
 
@@ -1825,7 +1836,7 @@ static ChiakiErrorCode takion_send_message_init(ChiakiTakion *takion, TakionMess
 	if(takion->cloud_direct)
 	{
 		uint8_t message[TAKION_CLOUD_PREFIX_SIZE + 1 + TAKION_MESSAGE_HEADER_SIZE + 0x10];
-		takion_write_cloud_prefix(message);
+		takion_write_cloud_prefix(message, takion->cloud_psn_wrapper_type, takion->version);
 		message[TAKION_CLOUD_PREFIX_SIZE] = TAKION_PACKET_TYPE_CONTROL;
 		takion_write_message_header(message + TAKION_CLOUD_PREFIX_SIZE + 1, takion->tag_remote, 0, TAKION_CHUNK_TYPE_INIT, 0, 0x10);
 		uint8_t *pl = message + TAKION_CLOUD_PREFIX_SIZE + 1 + TAKION_MESSAGE_HEADER_SIZE;
@@ -1855,7 +1866,7 @@ static ChiakiErrorCode takion_send_message_cookie(ChiakiTakion *takion, uint8_t 
 	if(takion->cloud_direct)
 	{
 		uint8_t message[TAKION_CLOUD_PREFIX_SIZE + 1 + TAKION_MESSAGE_HEADER_SIZE + TAKION_COOKIE_SIZE];
-		takion_write_cloud_prefix(message);
+		takion_write_cloud_prefix(message, takion->cloud_psn_wrapper_type, takion->version);
 		message[TAKION_CLOUD_PREFIX_SIZE] = TAKION_PACKET_TYPE_CONTROL;
 		takion_write_message_header(message + TAKION_CLOUD_PREFIX_SIZE + 1, takion->tag_remote, 0, TAKION_CHUNK_TYPE_COOKIE, 0, TAKION_COOKIE_SIZE);
 		memcpy(message + TAKION_CLOUD_PREFIX_SIZE + 1 + TAKION_MESSAGE_HEADER_SIZE, cookie, TAKION_COOKIE_SIZE);

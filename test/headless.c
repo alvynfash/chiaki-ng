@@ -370,6 +370,8 @@ static MunitResult test_headless_runtime_get_effective_connect_info(const MunitP
 		.ps5 = true,
 		.enable_dualsense = true,
 		.enable_keyboard = false,
+		.takion_protocol_version = 9,
+		.psn_wrapper_type = 0x59,
 		.resolution = CHIAKI_VIDEO_RESOLUTION_PRESET_720p,
 		.fps = CHIAKI_VIDEO_FPS_PRESET_60,
 		.bitrate = 9000,
@@ -381,6 +383,8 @@ static MunitResult test_headless_runtime_get_effective_connect_info(const MunitP
 	munit_assert_true(connect.ps5);
 	munit_assert_true(connect.enable_dualsense);
 	munit_assert_false(connect.enable_keyboard);
+	munit_assert_int(connect.cloud_takion_protocol_version, ==, 9);
+	munit_assert_int(connect.cloud_psn_wrapper_type, ==, 0x59);
 	munit_assert_int(connect.video_profile.bitrate, ==, 9000);
 	munit_assert_int(connect.video_profile.codec, ==, CHIAKI_CODEC_H264);
 
@@ -411,6 +415,8 @@ static MunitResult test_headless_runtime_get_effective_connect_info(const MunitP
 	munit_assert_int(chiaki_headless_runtime_get_effective_connect_info(&launch, &connect), ==, CHIAKI_ERR_SUCCESS);
 	munit_assert_false(connect.ps5);
 	munit_assert_true(connect.enable_keyboard);
+	munit_assert_int(connect.cloud_takion_protocol_version, ==, 9);
+	munit_assert_int(connect.cloud_psn_wrapper_type, ==, 0x59);
 	munit_assert_int(connect.video_profile.bitrate, ==, 23000);
 	munit_assert_int(connect.video_profile.codec, ==, CHIAKI_CODEC_H265);
 	munit_assert_double_equal(connect.packet_loss_max, 0.4, 10);
@@ -444,6 +450,8 @@ static MunitResult test_headless_runtime_get_sanity_report(const MunitParameter 
 		.ps5 = true,
 		.enable_dualsense = true,
 		.enable_keyboard = false,
+		.takion_protocol_version = 9,
+		.psn_wrapper_type = 0x59,
 		.resolution = CHIAKI_VIDEO_RESOLUTION_PRESET_720p,
 		.fps = CHIAKI_VIDEO_FPS_PRESET_60,
 		.bitrate = 8000,
@@ -3602,6 +3610,8 @@ static MunitResult test_headless_cloud_connect_info(const MunitParameter params[
 		.ps5 = true,
 		.enable_dualsense = true,
 		.enable_keyboard = false,
+		.takion_protocol_version = 9,
+		.psn_wrapper_type = 0x59,
 		.resolution = CHIAKI_VIDEO_RESOLUTION_PRESET_720p,
 		.fps = CHIAKI_VIDEO_FPS_PRESET_60,
 		.bitrate = 10000,
@@ -3613,6 +3623,8 @@ static MunitResult test_headless_cloud_connect_info(const MunitParameter params[
 	munit_assert_int(err, ==, CHIAKI_ERR_SUCCESS);
 	munit_assert_ptr_equal(out.host, launch.host);
 	munit_assert_true(out.cloud_direct);
+	munit_assert_int(out.cloud_takion_protocol_version, ==, 9);
+	munit_assert_int(out.cloud_psn_wrapper_type, ==, 0x59);
 	munit_assert_int(out.stream_port, ==, 41113);
 	munit_assert_ptr_equal(out.cloud_session_id, launch.session_id);
 	munit_assert_ptr_equal(out.cloud_launch_spec_b64, launch.launch_spec);

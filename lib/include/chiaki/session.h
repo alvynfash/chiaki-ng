@@ -97,6 +97,16 @@ typedef struct chiaki_connect_info_t
 	 */
 	bool cloud_direct;
 	/**
+	 * Cloud-direct Takion protocol version override.
+	 * 0 means infer the version from the target using the existing defaults.
+	 */
+	uint8_t cloud_takion_protocol_version;
+	/**
+	 * Cloud-direct PSN wrapper type used in the 4-byte Takion cloud prefix.
+	 * 0 means use the legacy/default wrapper type.
+	 */
+	uint8_t cloud_psn_wrapper_type;
+	/**
 	 * Non-standard UDP port for the Takion stream connection.
 	 * 0 means use the default (9296 for PS4, 9296 for cloud).
 	 * Set this to the port returned by the Gaikai /allocate response.
@@ -251,6 +261,8 @@ typedef struct chiaki_session_t
 		uint8_t psn_account_id[CHIAKI_PSN_ACCOUNT_ID_SIZE];
 		bool enable_idr_on_fec_failure;
 		bool cloud_direct;
+		uint8_t cloud_takion_protocol_version;
+		uint8_t cloud_psn_wrapper_type;
 		uint16_t stream_port;
 		char cloud_session_id[128]; // zero-terminated; copied from ChiakiConnectInfo
 		char *cloud_launch_spec_b64; // heap-allocated copy; NULL if not set

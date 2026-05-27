@@ -265,6 +265,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_session_init(ChiakiSession *session, Chiaki
 	session->connect_info.enable_dualsense = connect_info->enable_dualsense;
 	session->connect_info.enable_idr_on_fec_failure = connect_info->enable_idr_on_fec_failure;
 	session->connect_info.cloud_direct = connect_info->cloud_direct;
+	session->connect_info.cloud_takion_protocol_version = connect_info->cloud_takion_protocol_version;
+	session->connect_info.cloud_psn_wrapper_type = connect_info->cloud_psn_wrapper_type;
 	session->connect_info.stream_port = connect_info->stream_port;
 	if(connect_info->cloud_session_id)
 		strncpy(session->connect_info.cloud_session_id, connect_info->cloud_session_id, sizeof(session->connect_info.cloud_session_id) - 1);
@@ -502,16 +504,28 @@ static void *session_thread_func(void *arg)
 	// `morning` (= handshakeKey from /allocate) directly as the Takion key.
 	if(session->connect_info.cloud_direct)
 	{
-		CHIAKI_LOGI(session->log, "Cloud-direct mode: skipping TCP session request, ctrl, and Senkusha");
+		CHIAKI_LOGI(session->log, "Cloud-direct mode: skipping TCP session request and ctrl");
 
 		// Use the morning key as the Takion handshake key directly
 		memcpy(session->handshake_key, session->connect_info.morning, CHIAKI_HANDSHAKE_KEY_SIZE);
 
-		// Fallback network parameters (no Senkusha measurement)
+		// Fallback network parameters (no Senkusha measurement). PS Now PC
+		// v9 captures report a 1254-byte upstream MTU; keeping 1454 here can
+		// oversized-fragment the client BIG message before the server sends BANG.
 		session->mtu_in = 1454;
-		session->mtu_out = 1454;
-		session->rtt_us = 16000;
+		session->mtu_out = session->connect_info.cloud_takion_protocol_version == 9
+			? 1254 : 1454;
+		session->rtt_us = session->connect_info.cloud_takion_protocol_version == 9
+			? 14000 : 16000;
 		session->dontfrag = false;
+		CHIAKI_LOGI(session->log,
+			"Cloud-direct network fallback protocol=%u mtu_in=%u mtu_out=%u rtt_ms=%u",
+			(unsigned)session->connect_info.cloud_takion_protocol_version,
+			(unsigned)session->mtu_in,
+			(unsigned)session->mtu_out,
+			(unsigned)(session->rtt_us / 1000));
+
+		CHIAKI_LOGI(session->log, "Cloud-direct: using stream connection BIG without Senkusha preflight");
 
 		ChiakiErrorCode err = chiaki_ecdh_init(&session->ecdh);
 		if(err != CHIAKI_ERR_SUCCESS)

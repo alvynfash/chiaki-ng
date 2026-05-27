@@ -224,6 +224,8 @@ typedef struct chiaki_headless_cloud_launch_info_t
 	bool ps5;
 	bool enable_dualsense;
 	bool enable_keyboard;
+	uint8_t takion_protocol_version;
+	uint8_t psn_wrapper_type;
 	ChiakiVideoResolutionPreset resolution;
 	ChiakiVideoFPSPreset fps;
 	unsigned int bitrate;
@@ -1042,6 +1044,39 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start_strings(
 	ChiakiVideoFPSPreset fps,
 	unsigned int bitrate,
 	ChiakiCodec codec,
+	const char *ffmpeg_hw_decoder_name);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start_strings_with_protocol(
+	const char *host,
+	uint16_t stream_port,
+	const char *session_id,
+	const char *launch_spec,
+	const char *morning_b64,
+	const char *regist_key_hex,
+	bool ps5,
+	bool enable_dualsense,
+	bool enable_keyboard,
+	ChiakiVideoResolutionPreset resolution,
+	ChiakiVideoFPSPreset fps,
+	unsigned int bitrate,
+	ChiakiCodec codec,
+	uint8_t takion_protocol_version,
+	const char *ffmpeg_hw_decoder_name);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start_strings_with_protocol_and_wrapper(
+	const char *host,
+	uint16_t stream_port,
+	const char *session_id,
+	const char *launch_spec,
+	const char *morning_b64,
+	const char *regist_key_hex,
+	bool ps5,
+	bool enable_dualsense,
+	bool enable_keyboard,
+	ChiakiVideoResolutionPreset resolution,
+	ChiakiVideoFPSPreset fps,
+	unsigned int bitrate,
+	ChiakiCodec codec,
+	uint8_t takion_protocol_version,
+	uint8_t psn_wrapper_type,
 	const char *ffmpeg_hw_decoder_name);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_stop(void);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_request_idr(void);
