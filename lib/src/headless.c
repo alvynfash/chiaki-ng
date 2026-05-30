@@ -1244,10 +1244,13 @@ static void headless_on_session_event(ChiakiEvent *event, void *user)
 			out.type = chiaki_quit_reason_is_error(event->quit.reason) ? CHIAKI_HEADLESS_EVENT_ERROR : CHIAKI_HEADLESS_EVENT_STOPPED;
 			out.quit.reason = event->quit.reason;
 			out.quit.reason_str = event->quit.reason_str;
+			/* Emit the terminal event before marking the session stopped.
+			 * headless_emit_event intentionally suppresses callbacks once the
+			 * session is already stopping/stopped. */
+			headless_emit_event(s, &out);
 			chiaki_mutex_lock(&s->cb_mutex);
 			s->stopped = true;
 			chiaki_mutex_unlock(&s->cb_mutex);
-			headless_emit_event(s, &out);
 			return;
 		case CHIAKI_EVENT_VIDEO_FEC_FAILURE:
 			out.type = CHIAKI_HEADLESS_EVENT_WARNING;
@@ -1446,14 +1449,14 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_start(ChiakiHeadlessSessio
 	if(!s)
 		return CHIAKI_ERR_INVALID_DATA;
 
-	ChiakiHeadlessEvent ev = {0};
-	ev.type = CHIAKI_HEADLESS_EVENT_CONNECTING;
-	headless_emit_event(s, &ev);
-
 	chiaki_mutex_lock(&s->cb_mutex);
 	s->stopped = false;
 	s->stopping = false;
 	chiaki_mutex_unlock(&s->cb_mutex);
+
+	ChiakiHeadlessEvent ev = {0};
+	ev.type = CHIAKI_HEADLESS_EVENT_CONNECTING;
+	headless_emit_event(s, &ev);
 
 	ChiakiErrorCode err = chiaki_session_start(&s->session);
 	if(err != CHIAKI_ERR_SUCCESS)
@@ -1473,16 +1476,17 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_stop(ChiakiHeadlessSession
 {
 	if(!s)
 		return CHIAKI_ERR_INVALID_DATA;
+
+	ChiakiHeadlessEvent ev = {0};
+	ev.type = CHIAKI_HEADLESS_EVENT_STOPPING;
+	headless_emit_event(s, &ev);
+
 	chiaki_mutex_lock(&s->cb_mutex);
 	s->stopping = true;
 #if CHIAKI_LIB_ENABLE_OPUS
 	headless_runtime_audio_sink_stop_locked(s);
 #endif
 	chiaki_mutex_unlock(&s->cb_mutex);
-
-	ChiakiHeadlessEvent ev = {0};
-	ev.type = CHIAKI_HEADLESS_EVENT_STOPPING;
-	headless_emit_event(s, &ev);
 	return chiaki_session_stop(&s->session);
 }
 
