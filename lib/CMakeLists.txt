@@ -117,6 +117,13 @@ add_library(chiaki-lib ${HEADER_FILES} ${SOURCE_FILES} ${CHIAKI_LIB_PROTO_SOURCE
 configure_file(config.h.in include/chiaki/config.h)
 target_include_directories(chiaki-lib PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/include")
 
+# The headless Flutter host loads the C API from chiaki.dll at runtime.  Chiaki's
+# public declarations intentionally use an empty CHIAKI_EXPORT macro, so ask
+# CMake to emit the function exports when this target is a Windows DLL.
+if(WIN32 AND BUILD_SHARED_LIBS)
+	set_target_properties(chiaki-lib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
 if(CMAKE_C_COMPILER_ID STREQUAL GNU OR CMAKE_C_COMPILER_ID STREQUAL Clang)
 	target_compile_options(chiaki-lib PRIVATE -Wall)
 endif()
