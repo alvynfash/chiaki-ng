@@ -13,6 +13,9 @@
 #include <inttypes.h>
 #include <assert.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/types.h>
@@ -142,7 +145,19 @@ static void stream_connection_cloud_controller_variant_from_env(ChiakiStreamConn
 								 tkproto_ControllerConnectionPayload_ControllerType *controller_type,
 								 uint32_t *controller_id)
 {
-	const char *variant = getenv("CHIAKI_CLOUD_CONTROLLER_VARIANT");
+	const char *variant = NULL;
+#ifdef _WIN32
+	/* deck_station.exe and the MinGW-built chiaki.dll can have distinct CRT
+	 * environment snapshots. Read the process environment maintained by Windows
+	 * so a variant selected immediately before runtime start is visible here. */
+	char variant_buf[64] = {0};
+	DWORD variant_len = GetEnvironmentVariableA(
+		"CHIAKI_CLOUD_CONTROLLER_VARIANT", variant_buf, sizeof(variant_buf));
+	if(variant_len > 0 && variant_len < sizeof(variant_buf))
+		variant = variant_buf;
+#else
+	variant = getenv("CHIAKI_CLOUD_CONTROLLER_VARIANT");
+#endif
 	*controller_type = stream_connection->session->connect_info.enable_dualsense
 		? tkproto_ControllerConnectionPayload_ControllerType_DUALSENSE
 		: tkproto_ControllerConnectionPayload_ControllerType_DUALSHOCK4;
@@ -1910,7 +1925,11 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_send_controller_connectio
 		uint32_t controller_id;
 		stream_connection_cloud_controller_variant_from_env(stream_connection, &controller_type, &controller_id);
 		CHIAKI_LOGI(stream_connection->log,
-			"StreamConnection cloud-direct controller default from connect_info.enable_dualsense=%d",
+			"StreamConnection cloud-direct effective controller=%s id=%" PRIu32
+			" connect_info.enable_dualsense=%d",
+			controller_type == tkproto_ControllerConnectionPayload_ControllerType_DUALSHOCK4
+				? "DUALSHOCK4" : "DUALSENSE",
+			controller_id,
 			session->connect_info.enable_dualsense ? 1 : 0);
 
 		tkproto_TakionMessage cloud_msg;
