@@ -117,9 +117,14 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_ffmpeg_decoder_init(ChiakiFfmpegDecoder *de
 			}
 		}
 
-		if(!decoder->hw_device_ctx && av_hwdevice_ctx_create(&decoder->hw_device_ctx, type, NULL, NULL, 0) < 0)
+		int hw_device_rc = decoder->hw_device_ctx
+			? 0
+			: av_hwdevice_ctx_create(&decoder->hw_device_ctx, type, NULL, NULL, 0);
+		if(hw_device_rc < 0)
 		{
-			CHIAKI_LOGE(log, "Failed to create hwdevice context");
+			char hw_error[AV_ERROR_MAX_STRING_SIZE] = {0};
+			av_strerror(hw_device_rc, hw_error, sizeof(hw_error));
+			CHIAKI_LOGE(log, "Failed to create hwdevice context rc=%d error=%s", hw_device_rc, hw_error);
 			goto error_codec_context;
 		}
 		decoder->codec_context->hw_device_ctx = av_buffer_ref(decoder->hw_device_ctx);

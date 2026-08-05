@@ -184,6 +184,7 @@ typedef struct chiaki_takion_t
 
 	bool enable_dualsense;
 	bool cloud_direct; // insert 4-byte prefix in client→server CONTROL packets (tak-d cloud servers)
+	bool cloud_direct_receive_order_logged;
 	uint8_t cloud_psn_wrapper_type;
 } ChiakiTakion;
 

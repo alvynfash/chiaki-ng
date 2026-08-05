@@ -63,6 +63,7 @@ typedef enum chiaki_headless_external_video_frame_type_t
 {
 	CHIAKI_HEADLESS_EXTERNAL_VIDEO_FRAME_TYPE_NONE = 0,
 	CHIAKI_HEADLESS_EXTERNAL_VIDEO_FRAME_TYPE_DMABUF_DRM_PRIME,
+	CHIAKI_HEADLESS_EXTERNAL_VIDEO_FRAME_TYPE_D3D11_TEXTURE,
 } ChiakiHeadlessExternalVideoFrameType;
 
 typedef struct chiaki_headless_dmabuf_plane_t
@@ -88,6 +89,18 @@ typedef struct chiaki_headless_external_video_frame_t
 	int32_t frames_lost;
 	bool frame_recovered;
 	uint64_t monotonic_time_us;
+	/* Windows D3D11 external-frame payload. native_handle is a callback-scoped
+	 * ID3D11Texture2D*. The host must enqueue any GPU copy before returning,
+	 * must not Release() it, and must not retain it for later presentation.
+	 * AddRef() alone is not sufficient for deferred use because FFmpeg may
+	 * return the array slice to the decoder pool after callback return. */
+	uintptr_t native_handle;
+	/* Texture-array slice encoded by FFmpeg in AVFrame::data[1]. */
+	uint32_t native_subresource;
+	/* DXGI_FORMAT numeric value. Currently DXGI_FORMAT_NV12 (103) or
+	 * DXGI_FORMAT_P010 (104). Zero means unknown and the consumer should query
+	 * the ID3D11Texture2D description. */
+	uint32_t native_format;
 } ChiakiHeadlessExternalVideoFrame;
 
 typedef struct chiaki_headless_stats_t

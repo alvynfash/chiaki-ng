@@ -20,9 +20,12 @@ cmake -S . -B "$build_dir" \
 
 cmake --build "$build_dir" --config "$build_type"
 
-chiaki_dll="$build_dir/lib/chiaki.dll"
+chiaki_dll="$build_dir/lib/libchiaki.dll"
 if [[ ! -f "$chiaki_dll" ]]; then
-  echo "ERROR: expected Windows shared artifact missing: $chiaki_dll" >&2
+	chiaki_dll="$build_dir/lib/chiaki.dll"
+fi
+if [[ ! -f "$chiaki_dll" ]]; then
+  echo "ERROR: expected Windows shared artifact missing under $build_dir/lib" >&2
   exit 1
 fi
 

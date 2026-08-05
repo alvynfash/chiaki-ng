@@ -8,6 +8,7 @@
 
 #define CHIAKI_AUDIO_JITTER_PREFILL 3
 #define CHIAKI_AUDIO_JITTER_BUFFER_SIZE 8
+#define CHIAKI_AUDIO_MAX_CONCEAL_FRAMES 3
 
 static void chiaki_audio_receiver_frame(ChiakiAudioReceiver *audio_receiver, ChiakiSeqNum16 frame_index, bool is_haptics, uint8_t *buf, size_t buf_size);
 static void chiaki_audio_receiver_clear_jitter_buffer(ChiakiAudioReceiver *audio_receiver);
@@ -246,6 +247,28 @@ static void chiaki_audio_receiver_frame(ChiakiAudioReceiver *audio_receiver, Chi
 				bool can_conceal_loss = false;
 				if(newer_audio_buffered && newest >= 0)
 				{
+					/* A large sequence gap can follow a cloud packet-loss burst.
+					 * Calling Opus PLC once for every absent frame repeats old audio
+					 * in a tight loop and floods the realtime sink. Skip directly to
+					 * the oldest real buffered frame once the gap is too large. */
+					uint16_t missing_frames = (uint16_t)(
+						audio_receiver->jitter_buffer[oldest].frame_index
+						- audio_receiver->next_frame_index);
+					if(missing_frames > CHIAKI_AUDIO_MAX_CONCEAL_FRAMES)
+					{
+						CHIAKI_LOGD(audio_receiver->log,
+							"AudioReceiver resync: skipping %u missing frame(s) before %u",
+							(unsigned)missing_frames,
+							(unsigned)audio_receiver->jitter_buffer[oldest].frame_index);
+						audio_receiver->next_frame_index = audio_receiver->jitter_buffer[oldest].frame_index;
+						err = chiaki_mutex_unlock(&audio_receiver->mutex);
+						if(err != CHIAKI_ERR_SUCCESS)
+						{
+							CHIAKI_LOGE(audio_receiver->log, "Failed to unlock audio receiver mutex after resync: %s", chiaki_error_string(err));
+							return;
+						}
+						continue;
+					}
 					if(audio_receiver->jitter_buffer_count >= CHIAKI_AUDIO_JITTER_PREFILL)
 					{
 						ChiakiSeqNum16 required_lookahead = audio_receiver->next_frame_index + CHIAKI_AUDIO_JITTER_PREFILL;

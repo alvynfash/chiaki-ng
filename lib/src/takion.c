@@ -42,6 +42,7 @@
 // VERY similar to SCTP, see RFC 4960
 
 #define TAKION_A_RWND 0x19000
+#define TAKION_CLOUD_DIRECT_RCVBUF (4 * 1024 * 1024)
 #define TAKION_OUTBOUND_STREAMS 0x64
 #define TAKION_INBOUND_STREAMS 0x64
 
@@ -266,6 +267,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 	takion->postponed_packets_count = 0;
 	takion->enable_dualsense = info->enable_dualsense;
 	takion->cloud_direct = info->cloud_direct;
+	takion->cloud_direct_receive_order_logged = false;
 	takion->cloud_psn_wrapper_type = info->cloud_psn_wrapper_type ? info->cloud_psn_wrapper_type : 1;
 
 	CHIAKI_LOGI(takion->log, "Takion connecting (version %u, cloud_wrapper=0x%02x)",
@@ -288,7 +290,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 			CHIAKI_LOGE(takion->log, "Takion had problem reading extra messages from socket using PSN Connection with error: " CHIAKI_SOCKET_ERROR_FMT, CHIAKI_SOCKET_ERROR_VALUE);
 			goto error_sock;
 		}
-		const int rcvbuf_val = takion->a_rwnd;
+		const int rcvbuf_val = takion->cloud_direct ? TAKION_CLOUD_DIRECT_RCVBUF : takion->a_rwnd;
 		int r = setsockopt(takion->sock, SOL_SOCKET, SO_RCVBUF, (const CHIAKI_SOCKET_BUF_TYPE)&rcvbuf_val, sizeof(rcvbuf_val));
 		if(r < 0)
 		{
@@ -376,7 +378,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_connect(ChiakiTakion *takion, Chiaki
 			ret = CHIAKI_ERR_NETWORK;
 			goto error_pipe;
 		}
-		const int rcvbuf_val = takion->a_rwnd;
+		const int rcvbuf_val = takion->cloud_direct ? TAKION_CLOUD_DIRECT_RCVBUF : takion->a_rwnd;
 		int r = setsockopt(takion->sock, SOL_SOCKET, SO_RCVBUF, (const CHIAKI_SOCKET_BUF_TYPE)&rcvbuf_val, sizeof(rcvbuf_val));
 		if(r < 0)
 		{
@@ -1999,8 +2001,20 @@ static void takion_handle_packet_av(ChiakiTakion *takion, uint8_t base_type, uin
 	}
 
 	bool is_video = (base_type == TAKION_PACKET_TYPE_VIDEO);
-	if(!is_video)
+	/*
+	 * GKCrypt is shared by audio and video. Holding encrypted video packets in
+	 * the video-only reorder queue while dispatching audio immediately can move
+	 * the key stream far beyond the queued video positions. Cloud-direct then
+	 * cannot decrypt those video packets even when they arrived successfully.
+	 * Keep both media streams in receive order for this transport.
+	 */
+	if(!is_video || takion->cloud_direct)
 	{
+		if(is_video && takion->cloud_direct && !takion->cloud_direct_receive_order_logged)
+		{
+			takion->cloud_direct_receive_order_logged = true;
+			CHIAKI_LOGI(takion->log, "Cloud-direct AV dispatch mode=receive-order build=2026-08-05");
+		}
 		if(takion->cb)
 		{
 			ChiakiTakionEvent event = { 0 };

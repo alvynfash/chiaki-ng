@@ -53,7 +53,7 @@ static ChiakiHeadlessRuntimeRecoveryResult g_runtime_last_recovery_result = {0};
 static bool g_runtime_last_recovery_result_valid = false;
 static ChiakiHeadlessRuntimeRecoveryConfig g_runtime_recovery_config = {0};
 static bool g_runtime_recovery_config_init = false;
-static const uint32_t kHeadlessExternalVideoAbiRevision = 1;
+static const uint32_t kHeadlessExternalVideoAbiRevision = 2;
 static uint64_t g_headless_ext_video_gate_logs = 0;
 static uint64_t g_headless_ext_video_emit_logs = 0;
 static uint64_t g_headless_frame_pull_empty_logs = 0;
@@ -976,7 +976,53 @@ static void headless_on_ffmpeg_frame(ChiakiFfmpegDecoder *decoder, void *user)
 				out.width,
 				out.height);
 		}
-#if !defined(_WIN32)
+#if defined(_WIN32)
+		if(g_headless_ext_video_gate_logs < 8 || g_headless_ext_video_gate_logs % 600 == 0)
+		{
+			CHIAKI_LOGI(s->log,
+				"[headless.ext] gate cb=%d displayOnly=%d format=%d w=%u h=%u",
+				external_video_frame_cb ? 1 : 0,
+				display_only_host_video_sink ? 1 : 0,
+				(int)frame.frame->format,
+				out.width,
+				out.height);
+		}
+		g_headless_ext_video_gate_logs++;
+		if(external_video_frame_cb &&
+			!display_only_host_video_sink &&
+			frame.frame->format == AV_PIX_FMT_D3D11 &&
+			frame.frame->data[0])
+		{
+			AVHWFramesContext *frames_ctx = frame.frame->hw_frames_ctx
+				? (AVHWFramesContext *)frame.frame->hw_frames_ctx->data
+				: NULL;
+			ChiakiHeadlessExternalVideoFrame ext = {0};
+			ext.type = CHIAKI_HEADLESS_EXTERNAL_VIDEO_FRAME_TYPE_D3D11_TEXTURE;
+			ext.width = out.width;
+			ext.height = out.height;
+			ext.pts_seconds = out.pts_seconds;
+			ext.duration_seconds = out.duration_seconds;
+			ext.frames_lost = out.frames_lost;
+			ext.frame_recovered = out.frame_recovered;
+			ext.monotonic_time_us = out.monotonic_time_us;
+			ext.native_handle = (uintptr_t)frame.frame->data[0];
+			ext.native_subresource = (uint32_t)(uintptr_t)frame.frame->data[1];
+			if(frames_ctx && frames_ctx->sw_format == AV_PIX_FMT_NV12)
+				ext.native_format = 103u; /* DXGI_FORMAT_NV12 */
+			else if(frames_ctx && frames_ctx->sw_format == AV_PIX_FMT_P010LE)
+				ext.native_format = 104u; /* DXGI_FORMAT_P010 */
+			if(g_headless_ext_video_emit_logs < 8 || g_headless_ext_video_emit_logs % 600 == 0)
+			{
+				CHIAKI_LOGI(s->log,
+					"[headless.ext] emit d3d11 texture=%p slice=%u format=%u",
+					(void *)ext.native_handle,
+					ext.native_subresource,
+					ext.native_format);
+			}
+			g_headless_ext_video_emit_logs++;
+			external_video_frame_cb(&ext, video_frame_user);
+		}
+#else
 		if(g_headless_ext_video_gate_logs < 8 || g_headless_ext_video_gate_logs % 600 == 0)
 		{
 			CHIAKI_LOGI(s->log,
@@ -1872,11 +1918,17 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start(
 
 	if(!g_runtime_log_init)
 	{
-		/* Keep runtime logging non-verbose by default for embedded hosts:
-		 * verbose packet-level logs can flood stdout and destabilize host debug runs.
-		 */
-		chiaki_log_init(&g_runtime_log, CHIAKI_LOG_ALL & ~CHIAKI_LOG_VERBOSE, NULL, NULL);
+		/* The embedded Windows host commonly runs under `flutter run`, where stderr
+		 * is synchronous and surprisingly expensive.  Warning/error storms from
+		 * packet loss (FEC, missing frames and GKCrypt cache misses) can block the
+		 * Takion receive thread long enough to cause more packet loss and turn a
+		 * brief disturbance into continuous A/V starvation.  Keep the realtime
+		 * runtime on milestone-level logging; diagnostics snapshots expose the
+		 * counters without doing per-packet console I/O. */
+		chiaki_log_init(&g_runtime_log, CHIAKI_LOG_INFO, NULL, NULL);
 		g_runtime_log_init = true;
+		CHIAKI_LOGI(&g_runtime_log,
+			"Embedded runtime realtime-safe logging active (packet-storm logs suppressed)");
 	}
 
 	ChiakiHeadlessCreateInfo create_info = {
@@ -6316,7 +6368,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_media_session_start_cloud_strings(
 		log = &g_runtime_log;
 	else
 	{
-		chiaki_log_init(&g_runtime_log, CHIAKI_LOG_ALL, NULL, NULL);
+		/* Match the primary embedded start path.  Per-packet warning/error output
+		 * is unsafe on the realtime receive path, especially in Flutter Debug. */
+		chiaki_log_init(&g_runtime_log, CHIAKI_LOG_INFO, NULL, NULL);
 		g_runtime_log_init = true;
 		log = &g_runtime_log;
 	}

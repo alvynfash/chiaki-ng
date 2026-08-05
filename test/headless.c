@@ -38,6 +38,28 @@ static MunitResult test_headless_probe(const MunitParameter params[], void *user
 	return MUNIT_OK;
 }
 
+static MunitResult test_headless_external_video_frame_abi(const MunitParameter params[], void *user)
+{
+	(void)params;
+	(void)user;
+	munit_assert_int(
+		CHIAKI_HEADLESS_EXTERNAL_VIDEO_FRAME_TYPE_DMABUF_DRM_PRIME,
+		==,
+		1);
+	munit_assert_int(
+		CHIAKI_HEADLESS_EXTERNAL_VIDEO_FRAME_TYPE_D3D11_TEXTURE,
+		==,
+		2);
+	ChiakiHeadlessExternalVideoFrame frame = {0};
+	frame.native_handle = (uintptr_t)0x1234u;
+	frame.native_subresource = 7u;
+	frame.native_format = 103u;
+	munit_assert_uint64((uint64_t)frame.native_handle, ==, 0x1234u);
+	munit_assert_uint32(frame.native_subresource, ==, 7u);
+	munit_assert_uint32(frame.native_format, ==, 103u);
+	return MUNIT_OK;
+}
+
 static void test_headless_runtime_noop_event_cb(const ChiakiHeadlessEvent *event, void *user)
 {
 	(void)event;
@@ -3850,6 +3872,14 @@ MunitTest tests_headless[] = {
 	{
 		"/probe",
 		test_headless_probe,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL,
+	},
+	{
+		"/external_video_frame_abi",
+		test_headless_external_video_frame_abi,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,
