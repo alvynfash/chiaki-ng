@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <chiaki/headless.h>
+
+#include <stdio.h>
 #include <chiaki/audioreceiver.h>
 #include <chiaki/packetstats.h>
 #include <chiaki/time.h>
@@ -1607,7 +1609,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_set_login_pin(ChiakiHeadle
 
 CHIAKI_EXPORT uint32_t chiaki_headless_api_version(void)
 {
-	return 40;
+	return 41;
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_probe(void)
@@ -2148,6 +2150,37 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_comp
 	int16_t right_x,
 	int16_t right_y)
 {
+	return chiaki_headless_runtime_send_controller_state_with_touches_compat(
+		buttons,
+		l2_state,
+		r2_state,
+		left_x,
+		left_y,
+		right_x,
+		right_y,
+		-1,
+		0,
+		0,
+		-1,
+		0,
+		0);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_with_touches_compat(
+	uint32_t buttons,
+	uint8_t l2_state,
+	uint8_t r2_state,
+	int16_t left_x,
+	int16_t left_y,
+	int16_t right_x,
+	int16_t right_y,
+	int8_t touch_0_id,
+	uint16_t touch_0_x,
+	uint16_t touch_0_y,
+	int8_t touch_1_id,
+	uint16_t touch_1_x,
+	uint16_t touch_1_y)
+{
 	ChiakiErrorCode err = headless_runtime_ensure_lock();
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
@@ -2167,6 +2200,12 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_comp
 	state.left_y = left_y;
 	state.right_x = right_x;
 	state.right_y = right_y;
+	state.touches[0].id = touch_0_id;
+	state.touches[0].x = touch_0_x;
+	state.touches[0].y = touch_0_y;
+	state.touches[1].id = touch_1_id;
+	state.touches[1].x = touch_1_x;
+	state.touches[1].y = touch_1_y;
 	return chiaki_headless_session_send_controller_state(session, &state);
 }
 

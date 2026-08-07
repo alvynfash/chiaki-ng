@@ -33,7 +33,7 @@ static MunitResult test_headless_probe(const MunitParameter params[], void *user
 {
 	(void)params;
 	(void)user;
-	munit_assert_uint32(chiaki_headless_api_version(), ==, 40);
+	munit_assert_uint32(chiaki_headless_api_version(), ==, 41);
 	munit_assert_int(chiaki_headless_probe(), ==, CHIAKI_ERR_SUCCESS);
 	return MUNIT_OK;
 }

@@ -1101,6 +1101,20 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_comp
 	int16_t left_y,
 	int16_t right_x,
 	int16_t right_y);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_with_touches_compat(
+	uint32_t buttons,
+	uint8_t l2_state,
+	uint8_t r2_state,
+	int16_t left_x,
+	int16_t left_y,
+	int16_t right_x,
+	int16_t right_y,
+	int8_t touch_0_id,
+	uint16_t touch_0_x,
+	uint16_t touch_0_y,
+	int8_t touch_1_id,
+	uint16_t touch_1_x,
+	uint16_t touch_1_y);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_tap_button(uint32_t button_mask);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_callbacks(const ChiakiHeadlessCallbacks *callbacks);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_stream_profile_overrides(const ChiakiHeadlessStreamProfileOverrides *overrides);
