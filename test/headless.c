@@ -394,7 +394,7 @@ static MunitResult test_headless_runtime_get_effective_connect_info(const MunitP
 		.enable_keyboard = false,
 		.takion_protocol_version = 9,
 		.psn_wrapper_type = 0x59,
-		.resolution = CHIAKI_VIDEO_RESOLUTION_PRESET_720p,
+		.resolution = CHIAKI_VIDEO_RESOLUTION_PRESET_2160p,
 		.fps = CHIAKI_VIDEO_FPS_PRESET_60,
 		.bitrate = 9000,
 		.codec = CHIAKI_CODEC_H264,
@@ -407,6 +407,8 @@ static MunitResult test_headless_runtime_get_effective_connect_info(const MunitP
 	munit_assert_false(connect.enable_keyboard);
 	munit_assert_int(connect.cloud_takion_protocol_version, ==, 9);
 	munit_assert_int(connect.cloud_psn_wrapper_type, ==, 0x59);
+	munit_assert_int(connect.video_profile.width, ==, 3840);
+	munit_assert_int(connect.video_profile.height, ==, 2160);
 	munit_assert_int(connect.video_profile.bitrate, ==, 9000);
 	munit_assert_int(connect.video_profile.codec, ==, CHIAKI_CODEC_H264);
 

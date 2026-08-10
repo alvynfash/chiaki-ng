@@ -125,7 +125,9 @@ static bool headless_is_valid_resolution_preset(ChiakiVideoResolutionPreset reso
 	return resolution == CHIAKI_VIDEO_RESOLUTION_PRESET_360p
 		|| resolution == CHIAKI_VIDEO_RESOLUTION_PRESET_540p
 		|| resolution == CHIAKI_VIDEO_RESOLUTION_PRESET_720p
-		|| resolution == CHIAKI_VIDEO_RESOLUTION_PRESET_1080p;
+		|| resolution == CHIAKI_VIDEO_RESOLUTION_PRESET_1080p
+		|| resolution == CHIAKI_VIDEO_RESOLUTION_PRESET_1440p
+		|| resolution == CHIAKI_VIDEO_RESOLUTION_PRESET_2160p;
 }
 
 static bool headless_is_valid_fps_preset(ChiakiVideoFPSPreset fps)
