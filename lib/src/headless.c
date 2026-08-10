@@ -79,6 +79,14 @@ static const uint32_t kDrmFormatGr88 =
 static ChiakiErrorCode headless_runtime_ensure_lock(void);
 static void headless_runtime_recovery_status_reset_locked(void);
 
+static void headless_runtime_log_init_locked(void)
+{
+	if(g_runtime_log_init)
+		return;
+	chiaki_log_init(&g_runtime_log, CHIAKI_LOG_ERROR, NULL, NULL);
+	g_runtime_log_init = true;
+}
+
 typedef struct headless_runtime_config_t
 {
 	ChiakiHeadlessCallbacks callbacks;
@@ -1920,19 +1928,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start(
 	}
 	headless_apply_runtime_policy_overrides_to_connect_info(&connect_info, &runtime_config);
 
+	/* Runtime start-in-flight excludes concurrent log-mask changes. Keep normal
+	 * embedded sessions error-only; hosts can opt into diagnostics before start. */
 	if(!g_runtime_log_init)
 	{
-		/* The embedded Windows host commonly runs under `flutter run`, where stderr
-		 * is synchronous and surprisingly expensive.  Warning/error storms from
-		 * packet loss (FEC, missing frames and GKCrypt cache misses) can block the
-		 * Takion receive thread long enough to cause more packet loss and turn a
-		 * brief disturbance into continuous A/V starvation.  Keep the realtime
-		 * runtime on milestone-level logging; diagnostics snapshots expose the
-		 * counters without doing per-packet console I/O. */
-		chiaki_log_init(&g_runtime_log, CHIAKI_LOG_INFO, NULL, NULL);
-		g_runtime_log_init = true;
-		CHIAKI_LOGI(&g_runtime_log,
-			"Embedded runtime realtime-safe logging active (packet-storm logs suppressed)");
+		chiaki_mutex_lock(&g_runtime_lock);
+		headless_runtime_log_init_locked();
+		chiaki_mutex_unlock(&g_runtime_lock);
 	}
 
 	ChiakiHeadlessCreateInfo create_info = {
@@ -2224,6 +2226,43 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_tap_button(uint32_t button
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
 	return chiaki_headless_runtime_send_controller_state_compat(0, 0, 0, 0, 0, 0, 0);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_log_level_mask(uint32_t level_mask)
+{
+	if(level_mask & ~((uint32_t)CHIAKI_LOG_ALL))
+		return CHIAKI_ERR_INVALID_DATA;
+
+	ChiakiErrorCode err = headless_runtime_ensure_lock();
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+
+	chiaki_mutex_lock(&g_runtime_lock);
+	if(g_runtime_session || g_runtime_start_in_flight)
+	{
+		chiaki_mutex_unlock(&g_runtime_lock);
+		return CHIAKI_ERR_MUTEX_LOCKED;
+	}
+	headless_runtime_log_init_locked();
+	chiaki_log_set_level(&g_runtime_log, level_mask);
+	chiaki_mutex_unlock(&g_runtime_lock);
+	return CHIAKI_ERR_SUCCESS;
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_log_level_mask(uint32_t *out_level_mask)
+{
+	if(!out_level_mask)
+		return CHIAKI_ERR_INVALID_DATA;
+
+	ChiakiErrorCode err = headless_runtime_ensure_lock();
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+
+	chiaki_mutex_lock(&g_runtime_lock);
+	headless_runtime_log_init_locked();
+	*out_level_mask = g_runtime_log.level_mask;
+	chiaki_mutex_unlock(&g_runtime_lock);
+	return CHIAKI_ERR_SUCCESS;
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_callbacks(const ChiakiHeadlessCallbacks *callbacks)
@@ -6404,17 +6443,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_media_session_start_cloud_strings(
 		return err;
 	}
 
-	ChiakiLog *log = NULL;
-	if(g_runtime_log_init)
-		log = &g_runtime_log;
-	else
-	{
-		/* Match the primary embedded start path.  Per-packet warning/error output
-		 * is unsafe on the realtime receive path, especially in Flutter Debug. */
-		chiaki_log_init(&g_runtime_log, CHIAKI_LOG_INFO, NULL, NULL);
-		g_runtime_log_init = true;
-		log = &g_runtime_log;
-	}
+	err = headless_runtime_ensure_lock();
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	chiaki_mutex_lock(&g_runtime_lock);
+	headless_runtime_log_init_locked();
+	ChiakiLog *log = &g_runtime_log;
+	chiaki_mutex_unlock(&g_runtime_lock);
 
 	ChiakiHeadlessCreateInfo create_info = {
 		.connect_info = connect_info,

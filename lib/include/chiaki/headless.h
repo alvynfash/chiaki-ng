@@ -1116,6 +1116,14 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_with
 	uint16_t touch_1_x,
 	uint16_t touch_1_y);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_tap_button(uint32_t button_mask);
+/**
+ * Configure logging for future runtime-managed sessions.
+ *
+ * level_mask is a bitwise combination of ChiakiLogLevel values. The mask may
+ * only be changed while no runtime session is active or starting.
+ */
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_log_level_mask(uint32_t level_mask);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_log_level_mask(uint32_t *out_level_mask);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_callbacks(const ChiakiHeadlessCallbacks *callbacks);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_stream_profile_overrides(const ChiakiHeadlessStreamProfileOverrides *overrides);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_launch_overrides(const ChiakiHeadlessLaunchOverrides *overrides);

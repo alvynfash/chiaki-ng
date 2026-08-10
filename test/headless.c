@@ -3,6 +3,7 @@
 #include <munit.h>
 
 #include <chiaki/headless.h>
+#include <chiaki/log.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -78,6 +79,43 @@ static MunitResult test_headless_runtime_set_callbacks(const MunitParameter para
 	};
 	munit_assert_int(chiaki_headless_runtime_set_callbacks(&callbacks), ==, CHIAKI_ERR_SUCCESS);
 	munit_assert_int(chiaki_headless_runtime_set_callbacks(NULL), ==, CHIAKI_ERR_SUCCESS);
+	return MUNIT_OK;
+}
+
+static MunitResult test_headless_runtime_log_level_mask(const MunitParameter params[], void *user)
+{
+	(void)params;
+	(void)user;
+	uint32_t level_mask = 0;
+	const uint32_t diagnostics_mask =
+		CHIAKI_LOG_ERROR | CHIAKI_LOG_WARNING | CHIAKI_LOG_INFO | CHIAKI_LOG_DEBUG;
+
+	munit_assert_int(
+		chiaki_headless_runtime_get_log_level_mask(&level_mask),
+		==,
+		CHIAKI_ERR_SUCCESS);
+	munit_assert_uint32(level_mask, ==, CHIAKI_LOG_ERROR);
+	munit_assert_int(
+		chiaki_headless_runtime_set_log_level_mask(diagnostics_mask),
+		==,
+		CHIAKI_ERR_SUCCESS);
+	munit_assert_int(
+		chiaki_headless_runtime_get_log_level_mask(&level_mask),
+		==,
+		CHIAKI_ERR_SUCCESS);
+	munit_assert_uint32(level_mask, ==, diagnostics_mask);
+	munit_assert_int(
+		chiaki_headless_runtime_set_log_level_mask(CHIAKI_LOG_ALL | (1u << 31)),
+		==,
+		CHIAKI_ERR_INVALID_DATA);
+	munit_assert_int(
+		chiaki_headless_runtime_get_log_level_mask(NULL),
+		==,
+		CHIAKI_ERR_INVALID_DATA);
+	munit_assert_int(
+		chiaki_headless_runtime_set_log_level_mask(CHIAKI_LOG_ERROR),
+		==,
+		CHIAKI_ERR_SUCCESS);
 	return MUNIT_OK;
 }
 
@@ -3890,6 +3928,14 @@ MunitTest tests_headless[] = {
 	{
 		"/runtime_set_callbacks",
 		test_headless_runtime_set_callbacks,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL,
+	},
+	{
+		"/runtime_log_level_mask",
+		test_headless_runtime_log_level_mask,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,
