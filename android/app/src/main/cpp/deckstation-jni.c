@@ -2,6 +2,7 @@
 
 #include "audio-decoder.h"
 #include "audio-output.h"
+#include "deckstation-jni.h"
 #include "video-decoder.h"
 
 #include <android/log.h>
@@ -284,8 +285,7 @@ static void deckstation_session_free(JNIEnv *env, DeckStationAndroidSession *ses
 	free(session);
 }
 
-JNIEXPORT jint JNICALL
-Java_com_example_deck_1station_DeckStationAndroidBridge_nativeStart(
+static jint deckstation_native_start(
 	JNIEnv *env, jobject bridge, jobject surface, jstring host_value, jint stream_port,
 	jstring session_id_value, jstring launch_spec_value, jstring morning_value,
 	jstring regist_key_value, jint resolution, jint fps, jint bitrate, jint codec,
@@ -436,8 +436,7 @@ Java_com_example_deck_1station_DeckStationAndroidBridge_nativeStart(
 	return err;
 }
 
-JNIEXPORT jint JNICALL
-Java_com_example_deck_1station_DeckStationAndroidBridge_nativeStop(JNIEnv *env, jobject bridge)
+static jint deckstation_native_stop(JNIEnv *env, jobject bridge)
 {
 	(void)bridge;
 	pthread_mutex_lock(&g_session_mutex);
@@ -448,8 +447,7 @@ Java_com_example_deck_1station_DeckStationAndroidBridge_nativeStop(JNIEnv *env, 
 	return CHIAKI_ERR_SUCCESS;
 }
 
-JNIEXPORT jlongArray JNICALL
-Java_com_example_deck_1station_DeckStationAndroidBridge_nativeStats(JNIEnv *env, jobject bridge)
+static jlongArray deckstation_native_stats(JNIEnv *env, jobject bridge)
 {
 	(void)bridge;
 	jlong values[7] = {0, 0, 0, 0, 0, 0, 0};
@@ -471,8 +469,7 @@ Java_com_example_deck_1station_DeckStationAndroidBridge_nativeStats(JNIEnv *env,
 	return result;
 }
 
-JNIEXPORT jint JNICALL
-Java_com_example_deck_1station_DeckStationAndroidBridge_nativeSendControllerState(
+static jint deckstation_native_send_controller_state(
 	JNIEnv *env, jobject bridge, jint buttons, jint l2_state, jint r2_state,
 	jint left_x, jint left_y, jint right_x, jint right_y,
 	jint touch0_id, jint touch0_x, jint touch0_y,
@@ -504,8 +501,7 @@ Java_com_example_deck_1station_DeckStationAndroidBridge_nativeSendControllerStat
 	return err;
 }
 
-JNIEXPORT jstring JNICALL
-Java_com_example_deck_1station_DeckStationAndroidBridge_nativeSetCloudControllerVariant(
+static jstring deckstation_native_set_cloud_controller_variant(
 	JNIEnv *env, jobject bridge, jstring value)
 {
 	(void)bridge;
@@ -513,4 +509,54 @@ Java_com_example_deck_1station_DeckStationAndroidBridge_nativeSetCloudController
 	setenv("CHIAKI_CLOUD_CONTROLLER_VARIANT", variant, 1);
 	(*env)->ReleaseStringUTFChars(env, value, variant);
 	return (jstring)(*env)->NewLocalRef(env, value);
+}
+
+int deckstation_jni_register(JNIEnv *env)
+{
+	static const char *bridge_class_name =
+		"com/tribestick/deck_station/DeckStationAndroidBridge";
+	static const JNINativeMethod methods[] = {
+		{
+			"nativeStart",
+			"(Landroid/view/Surface;Ljava/lang/String;ILjava/lang/String;"
+			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IIIIZZZII)I",
+			(void *)deckstation_native_start,
+		},
+		{ "nativeStop", "()I", (void *)deckstation_native_stop },
+		{ "nativeStats", "()[J", (void *)deckstation_native_stats },
+		{
+			"nativeSendControllerState",
+			"(IIIIIIIIIIIII)I",
+			(void *)deckstation_native_send_controller_state,
+		},
+		{
+			"nativeSetCloudControllerVariant",
+			"(Ljava/lang/String;)Ljava/lang/String;",
+			(void *)deckstation_native_set_cloud_controller_variant,
+		},
+	};
+
+	jclass bridge_class = (*env)->FindClass(env, bridge_class_name);
+	if(!bridge_class)
+	{
+		if((*env)->ExceptionCheck(env))
+			(*env)->ExceptionClear(env);
+		__android_log_print(ANDROID_LOG_ERROR, DS_TAG,
+			"Unable to find JNI bridge class %s", bridge_class_name);
+		return JNI_ERR;
+	}
+	int result = (*env)->RegisterNatives(env, bridge_class, methods,
+		(jint)(sizeof(methods) / sizeof(methods[0])));
+	(*env)->DeleteLocalRef(env, bridge_class);
+	if(result != JNI_OK)
+	{
+		if((*env)->ExceptionCheck(env))
+			(*env)->ExceptionClear(env);
+		__android_log_print(ANDROID_LOG_ERROR, DS_TAG,
+			"RegisterNatives failed for %s", bridge_class_name);
+		return JNI_ERR;
+	}
+	__android_log_print(ANDROID_LOG_INFO, DS_TAG,
+		"Registered DeckStation Android bridge natives");
+	return JNI_OK;
 }

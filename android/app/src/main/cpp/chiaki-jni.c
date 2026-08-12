@@ -18,6 +18,9 @@
 #include "video-decoder.h"
 #include "audio-decoder.h"
 #include "audio-output.h"
+#if CHIAKI_ANDROID_DECKSTATION_BRIDGE
+#include "deckstation-jni.h"
+#endif
 #include "log.h"
 #include "chiaki-jni.h"
 
@@ -77,12 +80,25 @@ JavaVM *global_vm;
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)
 {
+	(void)reserved;
 	global_vm = vm;
 
 	android_chiaki_file_log_init(&global_log, CHIAKI_LOG_ALL & ~CHIAKI_LOG_VERBOSE, NULL);
 	CHIAKI_LOGI(&global_log, "Loading Chiaki Library");
 	ChiakiErrorCode err = chiaki_lib_init();
 	CHIAKI_LOGI(&global_log, "Chiaki Library Init Result: %s\n", chiaki_error_string(err));
+	if(err != CHIAKI_ERR_SUCCESS)
+		return JNI_ERR;
+	JNIEnv *env = NULL;
+	if((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION) != JNI_OK || !env)
+		return JNI_ERR;
+#if CHIAKI_ANDROID_DECKSTATION_BRIDGE
+	if(deckstation_jni_register(env) != JNI_OK)
+	{
+		CHIAKI_LOGE(&global_log, "Failed to register DeckStation Android bridge natives");
+		return JNI_ERR;
+	}
+#endif
 	return JNI_VERSION;
 }
 
