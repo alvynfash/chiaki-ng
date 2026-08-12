@@ -4,6 +4,7 @@
 #define CHIAKI_JNI_AUDIO_DECODER_H
 
 #include <jni.h>
+#include <stdbool.h>
 
 #include <chiaki/thread.h>
 #include <chiaki/log.h>
@@ -18,9 +19,12 @@ typedef struct android_chiaki_audio_decoder_t
 	ChiakiAudioHeader audio_header;
 
 	ChiakiMutex codec_mutex;
+	ChiakiMutex state_mutex;
 	struct AMediaCodec *codec;
 	uint64_t timestamp_cur;
 	ChiakiThread output_thread;
+	bool output_thread_started;
+	bool shutdown_output;
 
 	AndroidChiakiAudioDecoderSettingsCallback settings_cb;
 	AndroidChiakiAudioDecoderFrameCallback frame_cb;

@@ -10,7 +10,6 @@
 #include <string.h>
 
 #define INPUT_BUFFER_TIMEOUT_MS 10
-
 static void *android_chiaki_audio_decoder_output_thread_func(void *user);
 static void android_chiaki_audio_decoder_header(ChiakiAudioHeader *header, void *user);
 static void android_chiaki_audio_decoder_frame(uint8_t *buf, size_t buf_size, void *user);
@@ -21,35 +20,59 @@ ChiakiErrorCode android_chiaki_audio_decoder_init(AndroidChiakiAudioDecoder *dec
 	memset(&decoder->audio_header, 0, sizeof(decoder->audio_header));
 	decoder->codec = NULL;
 	decoder->timestamp_cur = 0;
+	decoder->output_thread_started = false;
+	decoder->shutdown_output = false;
 
 	decoder->cb_user = NULL;
 	decoder->settings_cb = NULL;
 	decoder->frame_cb = NULL;
 
-	return chiaki_mutex_init(&decoder->codec_mutex, true);
+	ChiakiErrorCode err = chiaki_mutex_init(&decoder->codec_mutex, true);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	err = chiaki_mutex_init(&decoder->state_mutex, false);
+	if(err != CHIAKI_ERR_SUCCESS)
+		chiaki_mutex_fini(&decoder->codec_mutex);
+	return err;
 }
 
 void android_chiaki_audio_decoder_shutdown_codec(AndroidChiakiAudioDecoder *decoder)
 {
 	chiaki_mutex_lock(&decoder->codec_mutex);
-	ssize_t codec_buf_index = AMediaCodec_dequeueInputBuffer(decoder->codec, -1);
-	if(codec_buf_index >= 0)
+	if(!decoder->codec)
 	{
-		CHIAKI_LOGI(decoder->log, "Audio Decoder sending EOS buffer");
-		AMediaCodec_queueInputBuffer(decoder->codec, (size_t)codec_buf_index, 0, 0, decoder->timestamp_cur++, AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+		chiaki_mutex_unlock(&decoder->codec_mutex);
+		return;
 	}
-	else
-		CHIAKI_LOGE(decoder->log, "Failed to get input buffer for shutting down Audio Decoder!");
+	AMediaCodec *codec = decoder->codec;
+	chiaki_mutex_lock(&decoder->state_mutex);
+	decoder->shutdown_output = true;
+	chiaki_mutex_unlock(&decoder->state_mutex);
+	AMediaCodec_stop(codec);
+	bool join_output_thread = decoder->output_thread_started;
 	chiaki_mutex_unlock(&decoder->codec_mutex);
-	chiaki_thread_join(&decoder->output_thread, NULL);
-	AMediaCodec_delete(decoder->codec);
-	decoder->codec = NULL;
+
+	if(join_output_thread)
+		chiaki_thread_join(&decoder->output_thread, NULL);
+
+	chiaki_mutex_lock(&decoder->codec_mutex);
+	decoder->output_thread_started = false;
+	if(decoder->codec == codec)
+	{
+		AMediaCodec_delete(codec);
+		decoder->codec = NULL;
+	}
+	chiaki_mutex_lock(&decoder->state_mutex);
+	decoder->shutdown_output = false;
+	chiaki_mutex_unlock(&decoder->state_mutex);
+	chiaki_mutex_unlock(&decoder->codec_mutex);
 }
 
 void android_chiaki_audio_decoder_fini(AndroidChiakiAudioDecoder *decoder)
 {
 	if(decoder->codec)
 		android_chiaki_audio_decoder_shutdown_codec(decoder);
+	chiaki_mutex_fini(&decoder->state_mutex);
 	chiaki_mutex_fini(&decoder->codec_mutex);
 }
 
@@ -67,7 +90,8 @@ static void *android_chiaki_audio_decoder_output_thread_func(void *user)
 	while(1)
 	{
 		AMediaCodecBufferInfo info;
-		ssize_t codec_buf_index = AMediaCodec_dequeueOutputBuffer(decoder->codec, &info, -1);
+		ssize_t codec_buf_index = AMediaCodec_dequeueOutputBuffer(
+			decoder->codec, &info, -1);
 		if(codec_buf_index >= 0)
 		{
 			if(decoder->settings_cb)
@@ -84,6 +108,14 @@ static void *android_chiaki_audio_decoder_output_thread_func(void *user)
 				CHIAKI_LOGI(decoder->log, "AMediaCodec for Audio Decoder reported EOS");
 				break;
 			}
+		}
+		else
+		{
+			chiaki_mutex_lock(&decoder->state_mutex);
+			bool shutdown = decoder->shutdown_output;
+			chiaki_mutex_unlock(&decoder->state_mutex);
+			if(shutdown)
+				break;
 		}
 	}
 
@@ -130,6 +162,8 @@ static void android_chiaki_audio_decoder_header(ChiakiAudioHeader *header, void 
 		AMediaCodec_delete(decoder->codec);
 		decoder->codec = NULL;
 	}
+	else
+		decoder->output_thread_started = true;
 
 	uint8_t opus_id_head[0x13];
 	memcpy(opus_id_head, "OpusHead", 8);
@@ -183,7 +217,7 @@ static void android_chiaki_audio_decoder_frame(uint8_t *buf, size_t buf_size, vo
 		if(codec_buf_index < 0)
 		{
 			CHIAKI_LOGE(decoder->log, "Failed to get input audio buffer");
-			return;
+			goto beach;
 		}
 
 		size_t codec_buf_size;

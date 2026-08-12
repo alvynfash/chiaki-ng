@@ -466,9 +466,9 @@ struct chiaki_headless_session_t
 #if CHIAKI_LIB_ENABLE_OPUS
 	ChiakiOpusDecoder audio_decoder;
 	bool audio_decoder_init;
+#endif
 	uint32_t audio_channels;
 	uint32_t audio_rate;
-#endif
 
 	ChiakiThread stats_thread;
 	bool stats_thread_started;

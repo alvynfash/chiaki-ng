@@ -60,17 +60,25 @@ extern "C" void android_chiaki_audio_output_settings(uint32_t channels, uint32_t
 
 	oboe::AudioStreamBuilder builder;
 	builder.setPerformanceMode(oboe::PerformanceMode::LowLatency)
-		->setSharingMode(oboe::SharingMode::Exclusive)
+		->setSharingMode(oboe::SharingMode::Shared)
 		->setFormat(oboe::AudioFormat::I16)
 		->setChannelCount(channels)
 		->setSampleRate(rate)
+		->setUsage(oboe::Usage::Game)
 		->setCallback(&ao->stream_callback);
 
 	auto result = builder.openManagedStream(ao->stream);
 	if(result == oboe::Result::OK)
-		CHIAKI_LOGI(ao->log, "Audio Output opened Oboe stream");
+		CHIAKI_LOGI(ao->log,
+			"Audio Output opened Oboe stream api=%s sharing=%s rate=%d channels=%d",
+			oboe::convertToText(ao->stream->getAudioApi()),
+			oboe::convertToText(ao->stream->getSharingMode()),
+			ao->stream->getSampleRate(), ao->stream->getChannelCount());
 	else
+	{
 		CHIAKI_LOGE(ao->log, "Audio Output failed to open Oboe stream: %s", oboe::convertToText(result));
+		return;
+	}
 
 	result = ao->stream->start();
 	if(result == oboe::Result::OK)

@@ -79,7 +79,7 @@ private class ChiakiNative
 	{
 		init
 		{
-			System.loadLibrary("chiaki-jni")
+				System.loadLibrary("fash")
 		}
 		@JvmStatic external fun errorCodeToString(value: Int): String
 		@JvmStatic external fun quitReasonToString(value: Int): String

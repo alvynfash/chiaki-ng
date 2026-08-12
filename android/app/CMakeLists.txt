@@ -13,7 +13,9 @@ add_library(chiaki-jni SHARED
         src/main/cpp/audio-decoder.c
         src/main/cpp/audio-output.h
         src/main/cpp/audio-output.cpp
+        src/main/cpp/deckstation-jni.c
         src/main/cpp/circular-fifo.hpp)
+set_target_properties(chiaki-jni PROPERTIES OUTPUT_NAME fash)
 target_link_libraries(chiaki-jni chiaki-lib)
 
 find_library(ANDROID_LIB_LOG log)
