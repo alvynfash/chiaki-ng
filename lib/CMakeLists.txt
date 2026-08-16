@@ -109,13 +109,22 @@ set_source_files_properties(${CHIAKI_LIB_PROTO_SOURCE_FILES} ${CHIAKI_LIB_PROTO_
 include_directories("${CHIAKI_LIB_PROTO_INCLUDE_DIR}")
 
 if(CHIAKI_LIB_ENABLE_OPUS)
-	find_package(Opus REQUIRED)
-	include_directories(${Opus_INCLUDE_DIRS})
+	if(TARGET opus)
+		set(Opus_LIBRARIES opus)
+		include_directories("${OPUS_PREFIX_INCLUDE_DIR}")
+	else()
+		find_package(Opus REQUIRED)
+		include_directories(${Opus_INCLUDE_DIRS})
+	endif()
 endif()
 
 add_library(chiaki-lib ${HEADER_FILES} ${SOURCE_FILES} ${CHIAKI_LIB_PROTO_SOURCE_FILES} ${CHIAKI_LIB_PROTO_HEADER_FILES})
 configure_file(config.h.in include/chiaki/config.h)
 target_include_directories(chiaki-lib PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/include")
+
+if(IOS)
+	target_compile_definitions(chiaki-lib PRIVATE CHIAKI_PLATFORM_IOS=1)
+endif()
 
 # The headless Flutter host loads the C API from chiaki.dll at runtime.  Chiaki's
 # public declarations intentionally use an empty CHIAKI_EXPORT macro, so ask
@@ -168,7 +177,7 @@ else()
 	target_link_libraries(chiaki-lib PkgConfig::MINIUPNPC)
 endif()
 
-if(NOT CHIAKI_IS_SWITCH AND NOT CHIAKI_ENABLE_ANDROID)
+if(NOT CHIAKI_IS_SWITCH AND NOT CHIAKI_ENABLE_ANDROID AND NOT IOS AND NOT TVOS)
 	find_program(PKG_CONFIG_EXECUTABLE pkg-config)
 	if(PKG_CONFIG_EXECUTABLE)
 		pkg_search_module(LIBEVENT libevent QUIET IMPORTED_TARGET)
