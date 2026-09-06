@@ -969,6 +969,14 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_connect_info_init_cloud_direct(
 	const ChiakiHeadlessCloudLaunchInfo *launch_info);
 
 /**
+ * Build cloud-direct connect-info using the same effective launch and policy
+ * overrides used by chiaki_headless_runtime_cloud_start().
+ */
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_build_cloud_connect_info(
+	ChiakiConnectInfo *out_connect_info,
+	const ChiakiHeadlessCloudLaunchInfo *launch_info);
+
+/**
  * Lightweight ABI / linkage probe helpers for host integrations.
  * These do not create a streaming session and are safe to call at startup.
  */

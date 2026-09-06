@@ -119,10 +119,10 @@ void emit_stream_stats(RuntimeSession *runtime)
 
 void log_callback(ChiakiLogLevel level, const char *message, void *user)
 {
-	(void)level;
 	(void)user;
 	if(message)
-		std::fprintf(stderr, "[DeckStationChiakiIOS] %s\n", message);
+		NSLog(@"[DeckStationChiakiIOS][%c] %s",
+			chiaki_log_level_char(level), message);
 }
 
 void session_event(ChiakiEvent *event, void *user)
@@ -321,7 +321,7 @@ extern "C" int32_t deckstation_ios_runtime_start_json(const char *json_value)
 		if(error != CHIAKI_ERR_SUCCESS)
 			return error;
 
-		chiaki_log_init(&runtime->log, CHIAKI_LOG_ALL & ~CHIAKI_LOG_VERBOSE,
+		chiaki_log_init(&runtime->log, CHIAKI_LOG_WARNING | CHIAKI_LOG_ERROR,
 			log_callback, nullptr);
 		ChiakiHeadlessCloudLaunchInfo launch{
 			.host = runtime->host.c_str(),
@@ -348,7 +348,11 @@ extern "C" int32_t deckstation_ios_runtime_start_json(const char *json_value)
 			.codec = static_cast<ChiakiCodec>(integer_value(json, @"codec", 1)),
 		};
 		ChiakiConnectInfo connect_info{};
-		error = chiaki_headless_connect_info_init_cloud_direct(&connect_info, &launch);
+		// Keep cloud launch construction byte-for-byte aligned with the desktop
+		// headless runtime. VideoToolbox remains an iOS-only consumer after the
+		// shared transport configuration has been built.
+		error = chiaki_headless_runtime_build_cloud_connect_info(
+			&connect_info, &launch);
 		if(error != CHIAKI_ERR_SUCCESS)
 			return error;
 
@@ -422,6 +426,28 @@ extern "C" int32_t deckstation_ios_runtime_stats(
 	if(value_count > 4) values[4] = runtime->started ? 1 : 0;
 	if(value_count > 5 && runtime->video_decoder)
 		values[5] = runtime->video_decoder->RejectedFrames();
+	ChiakiStreamConnection *connection = &runtime->session.stream_connection;
+	uint64_t packets_received = 0;
+	uint64_t packets_lost = 0;
+	chiaki_packet_stats_get(&connection->packet_stats, false,
+		&packets_received, &packets_lost);
+	if(value_count > 6) values[6] = packets_received;
+	if(value_count > 7) values[7] = packets_lost;
+	if(connection->video_receiver)
+	{
+		ChiakiStreamStats *stream_stats =
+			&connection->video_receiver->frame_processor.stream_stats;
+		if(value_count > 8) values[8] = stream_stats->total_bytes;
+		if(value_count > 9) values[9] = stream_stats->total_frames;
+		if(value_count > 10) values[10] = 1;
+	}
+	chiaki_mutex_lock(&connection->state_mutex);
+	if(value_count > 11) values[11] = static_cast<uint64_t>(connection->state);
+	if(value_count > 12) values[12] = connection->state_finished ? 1 : 0;
+	if(value_count > 13) values[13] = connection->state_failed ? 1 : 0;
+	if(value_count > 14) values[14] = connection->remote_disconnected ? 1 : 0;
+	if(value_count > 15) values[15] = connection->last_big_client_version;
+	chiaki_mutex_unlock(&connection->state_mutex);
 	return CHIAKI_ERR_SUCCESS;
 }
 

@@ -248,6 +248,28 @@ static void headless_apply_runtime_policy_overrides_to_connect_info(
 		connect_info->packet_loss_max = config->policy_overrides.packet_loss_max;
 }
 
+static ChiakiErrorCode headless_build_cloud_connect_info(
+	ChiakiConnectInfo *out_connect_info,
+	const ChiakiHeadlessCloudLaunchInfo *launch_info,
+	const HeadlessRuntimeConfig *config)
+{
+	if(!out_connect_info || !launch_info || !config)
+		return CHIAKI_ERR_INVALID_DATA;
+
+	ChiakiHeadlessCloudLaunchInfo launch = *launch_info;
+	headless_apply_runtime_config_to_launch(&launch, config);
+	ChiakiErrorCode err = headless_validate_launch_stream_fields(&launch);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	err = chiaki_headless_connect_info_init_cloud_direct(out_connect_info,
+		&launch);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	headless_apply_runtime_policy_overrides_to_connect_info(out_connect_info,
+		config);
+	return CHIAKI_ERR_SUCCESS;
+}
+
 static ChiakiErrorCode headless_runtime_snapshot_config(HeadlessRuntimeConfig *out_config)
 {
 	if(!out_config)
@@ -436,6 +458,18 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_connect_info_init_cloud_direct(
 
 	*out_connect_info = connect;
 	return CHIAKI_ERR_SUCCESS;
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_build_cloud_connect_info(
+	ChiakiConnectInfo *out_connect_info,
+	const ChiakiHeadlessCloudLaunchInfo *launch_info)
+{
+	HeadlessRuntimeConfig runtime_config = {0};
+	ChiakiErrorCode err = headless_runtime_snapshot_config(&runtime_config);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	return headless_build_cloud_connect_info(out_connect_info, launch_info,
+		&runtime_config);
 }
 
 struct chiaki_headless_session_t
@@ -1893,32 +1927,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start(
 	runtime_config.policy_overrides_set = g_runtime_policy_overrides_set;
 	chiaki_mutex_unlock(&g_runtime_lock);
 
-	if(!launch_info || !launch_info->host || !launch_info->session_id || !launch_info->launch_spec || !launch_info->morning)
-		return CHIAKI_ERR_INVALID_DATA;
-	if(launch_info->morning_size != CHIAKI_HANDSHAKE_KEY_SIZE)
-		return CHIAKI_ERR_INVALID_DATA;
-
-	uint8_t morning[CHIAKI_HANDSHAKE_KEY_SIZE] = {0};
-	uint8_t regist_key[CHIAKI_SESSION_AUTH_SIZE] = {0};
-	ChiakiHeadlessCloudLaunchInfo launch = *launch_info;
-	memcpy(morning, launch_info->morning, CHIAKI_HANDSHAKE_KEY_SIZE);
-	launch.morning = morning;
-	headless_regist_key_zero_fill(regist_key, launch_info->regist_key, launch_info->regist_key_size);
-	launch.regist_key = regist_key;
-	launch.regist_key_size = CHIAKI_SESSION_AUTH_SIZE;
-
-	headless_apply_runtime_config_to_launch(&launch, &runtime_config);
-	err = headless_validate_launch_stream_fields(&launch);
-	if(err != CHIAKI_ERR_SUCCESS)
-	{
-		chiaki_mutex_lock(&g_runtime_lock);
-		g_runtime_start_in_flight = false;
-		chiaki_mutex_unlock(&g_runtime_lock);
-		return err;
-	}
-
 	ChiakiConnectInfo connect_info = {0};
-	err = chiaki_headless_connect_info_init_cloud_direct(&connect_info, &launch);
+	err = headless_build_cloud_connect_info(&connect_info, launch_info,
+		&runtime_config);
 	if(err != CHIAKI_ERR_SUCCESS)
 	{
 		chiaki_mutex_lock(&g_runtime_lock);
@@ -1926,8 +1937,6 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start(
 		chiaki_mutex_unlock(&g_runtime_lock);
 		return err;
 	}
-	headless_apply_runtime_policy_overrides_to_connect_info(&connect_info, &runtime_config);
-
 	/* Runtime start-in-flight excludes concurrent log-mask changes. Keep normal
 	 * embedded sessions error-only; hosts can opt into diagnostics before start. */
 	if(!g_runtime_log_init)

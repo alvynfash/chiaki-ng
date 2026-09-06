@@ -61,6 +61,7 @@ private:
 	std::atomic<uint64_t> submitted_frames_{0};
 	std::atomic<uint64_t> rendered_frames_{0};
 	std::atomic<uint64_t> rejected_frames_{0};
+	std::atomic<uint64_t> output_errors_{0};
 };
 
 #endif

@@ -204,6 +204,23 @@ bool DeckStationIOSVideoDecoder::Submit(const uint8_t *data, size_t size,
 
 	std::lock_guard<std::mutex> lock(mutex_);
 	CaptureParameterSets(units);
+	bool has_vcl = false;
+	for(const NalUnit &unit : units)
+	{
+		if(unit.size == 0)
+			continue;
+		const int type = chiaki_codec_is_h265(codec_)
+			? ((unit.data[0] >> 1) & 0x3f)
+			: (unit.data[0] & 0x1f);
+		has_vcl = has_vcl || (chiaki_codec_is_h265(codec_)
+			? type <= 31 : (type >= 1 && type <= 5));
+	}
+
+	// The profile header is delivered through the same callback as frames. It
+	// contains codec configuration only; submitting it as a compressed frame
+	// makes VideoToolbox report codecBadDataErr.
+	if(!has_vcl)
+		return !sps_.empty() || !pps_.empty() || !vps_.empty();
 	if(!EnsureSessionLocked())
 	{
 		// Initial access units commonly contain only parameter sets. They are
@@ -272,8 +289,18 @@ void DeckStationIOSVideoDecoder::OutputCallback(
 	(void)presentation_duration;
 	auto *decoder = static_cast<DeckStationIOSVideoDecoder *>(
 		decompression_output_ref_con);
-	if(!decoder || status != noErr || !image_buffer)
+	if(!decoder)
 		return;
+	if(status != noErr || !image_buffer)
+	{
+		const uint64_t error_index = ++decoder->output_errors_;
+		if(error_index <= 12 || error_index % 300 == 0)
+			CHIAKI_LOGW(decoder->log_,
+				"iOS VideoToolbox output rejected frame %llu: status=%d flags=0x%x image=%d",
+				(unsigned long long)error_index, (int)status,
+				(unsigned int)info_flags, image_buffer ? 1 : 0);
+		return;
+	}
 	decoder->rendered_frames_++;
 	if(!decoder->callback_)
 		return;

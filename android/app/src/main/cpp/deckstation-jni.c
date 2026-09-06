@@ -378,7 +378,8 @@ static jint deckstation_native_start(
 	};
 	ChiakiConnectInfo connect_info = {0};
 	if(err == CHIAKI_ERR_SUCCESS)
-		err = chiaki_headless_connect_info_init_cloud_direct(&connect_info, &launch);
+		err = chiaki_headless_runtime_build_cloud_connect_info(
+			&connect_info, &launch);
 
 	if(err == CHIAKI_ERR_SUCCESS)
 	{
