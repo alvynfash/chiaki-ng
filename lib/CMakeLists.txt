@@ -43,7 +43,8 @@ set(HEADER_FILES
 		include/chiaki/remote/holepunch.h
 		include/chiaki/remote/rudp.h
 		include/chiaki/remote/rudpsendbuffer.h
-		include/chiaki/headless.h)
+		include/chiaki/headless.h
+		include/chiaki/cloudsession.h)
 
 set(SOURCE_FILES
 		src/common.c
@@ -87,6 +88,13 @@ set(SOURCE_FILES
 		src/orientation.c
 		src/bitstream.c
 		src/headless.c
+		src/cloudsession.c
+		src/cloudsession_kamaji.c
+		src/cloudsession_gaikai.c
+		src/cloudsession_ping.c
+		src/cloudsession_json.c
+		src/cloudsession_compat.c
+		src/curl_http.c
 		src/remote/holepunch.c
 		src/remote/rudp.c
 		src/remote/rudpsendbuffer.c)

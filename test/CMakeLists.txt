@@ -15,6 +15,7 @@ set(CHIAKI_UNIT_SOURCES
 				test_log.c
 				test_log.h
 				bitstream.c
+				cloudsession.c
 				headless.c
 				regist.c)
 
