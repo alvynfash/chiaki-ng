@@ -23,15 +23,17 @@ ChiakiErrorCode cc_ping_datacenter(ChiakiLog *log, const char *public_ip, int po
 		return CHIAKI_ERR_INVALID_DATA;
 
 	// chiaki_session_init owns address resolution and initializes the internal
-	// synchronization objects Senkusha expects.  Cloud-direct mode selects the
-	// resolved address before the probe and makes Senkusha use stream_port.
+	// synchronization objects Senkusha expects. Senkusha recognizes this as a
+	// cloud probe from the v9 protocol, stream port, and session key. Only PS Now
+	// uses the four-byte PSN packet wrapper; PS Cloud probes are unwrapped.
 	ChiakiConnectInfo connect;
 	memset(&connect, 0, sizeof(connect));
-	connect.ps5 = service_type && strcmp(service_type, "pscloud") == 0;
+	bool pscloud = service_type && strcmp(service_type, "pscloud") == 0;
+	connect.ps5 = pscloud;
 	connect.host = public_ip;
-	connect.cloud_direct = true;
+	connect.cloud_direct = !pscloud;
 	connect.cloud_takion_protocol_version = 9;
-	connect.cloud_psn_wrapper_type = connect.ps5 ? 0 : 1;
+	connect.cloud_psn_wrapper_type = pscloud ? 0 : 1;
 	connect.stream_port = (uint16_t)port;
 	connect.cloud_launch_spec_b64 = session_key;
 	connect.audio_video_disabled = CHIAKI_AUDIO_VIDEO_DISABLED;
@@ -40,7 +42,23 @@ ChiakiErrorCode cc_ping_datacenter(ChiakiLog *log, const char *public_ip, int po
 	ChiakiSession session;
 	ChiakiErrorCode err = chiaki_session_init(&session, &connect, log);
 	if(err != CHIAKI_ERR_SUCCESS)
+	{
+		CHIAKI_LOGW(log, "[PING] session init failed for %s:%d service=%s: %s",
+			public_ip, port, pscloud ? "pscloud" : "psnow", chiaki_error_string(err));
 		return err;
+	}
+	if(!session.connect_info.host_addrinfo_selected)
+		session.connect_info.host_addrinfo_selected = session.connect_info.host_addrinfos;
+	if(!session.connect_info.host_addrinfo_selected)
+	{
+		CHIAKI_LOGW(log, "[PING] no resolved address for %s:%d service=%s",
+			public_ip, port, pscloud ? "pscloud" : "psnow");
+		chiaki_session_fini(&session);
+		return CHIAKI_ERR_HOST_DOWN;
+	}
+
+	CHIAKI_LOGI(log, "[PING] probing %s:%d service=%s protocol=9 wrapper=%s",
+		public_ip, port, pscloud ? "pscloud" : "psnow", pscloud ? "none" : "0x01");
 
 	ChiakiSenkusha senkusha;
 	err = chiaki_senkusha_init(&senkusha, &session);
@@ -55,6 +73,12 @@ ChiakiErrorCode cc_ping_datacenter(ChiakiLog *log, const char *public_ip, int po
 			if(out_rtt_us) *out_rtt_us = (int64_t)rtt_us;
 			if(out_mtu_in) *out_mtu_in = mtu_in > 0 ? mtu_in : 1454;
 			if(out_mtu_out) *out_mtu_out = mtu_out > 0 ? mtu_out : 1254;
+		}
+		else
+		{
+			CHIAKI_LOGW(log, "[PING] probe failed for %s:%d service=%s: %s rtt=%llu",
+				public_ip, port, pscloud ? "pscloud" : "psnow",
+				chiaki_error_string(err), (unsigned long long)rtt_us);
 		}
 	}
 

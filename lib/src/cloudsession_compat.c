@@ -15,6 +15,8 @@
 #include <strings.h>
 #endif
 
+#ifndef CHIAKI_CLOUDCATALOG_HELPERS_EXTERNAL
+
 static struct json_object *json_value(struct json_object *obj, const char *key)
 {
 	struct json_object *value = NULL;
@@ -144,3 +146,5 @@ void chiaki_cloud_gaikai_language(const char *locale, char *out, size_t out_sz)
 	if(!out[0])
 		snprintf(out, out_sz, "en");
 }
+
+#endif

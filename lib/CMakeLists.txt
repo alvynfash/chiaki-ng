@@ -44,7 +44,8 @@ set(HEADER_FILES
 		include/chiaki/remote/rudp.h
 		include/chiaki/remote/rudpsendbuffer.h
 		include/chiaki/headless.h
-		include/chiaki/cloudsession.h)
+		include/chiaki/cloudsession.h
+		include/chiaki/cloudcatalog.h)
 
 set(SOURCE_FILES
 		src/common.c
@@ -94,6 +95,13 @@ set(SOURCE_FILES
 		src/cloudsession_ping.c
 		src/cloudsession_json.c
 		src/cloudsession_compat.c
+		src/cloudcatalog_cache.c
+		src/cloudcatalog_consts.c
+		src/cloudcatalog_fetch.c
+		src/cloudcatalog_merge.c
+		src/cloudcatalog_unified.c
+		src/cloudcatalog_util.c
+		src/cloudcatalog_json.c
 		src/curl_http.c
 		src/remote/holepunch.c
 		src/remote/rudp.c
@@ -129,6 +137,7 @@ endif()
 add_library(chiaki-lib ${HEADER_FILES} ${SOURCE_FILES} ${CHIAKI_LIB_PROTO_SOURCE_FILES} ${CHIAKI_LIB_PROTO_HEADER_FILES})
 configure_file(config.h.in include/chiaki/config.h)
 target_include_directories(chiaki-lib PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/include")
+target_compile_definitions(chiaki-lib PRIVATE CHIAKI_CLOUDCATALOG_HELPERS_EXTERNAL=1)
 
 if(IOS)
 	target_compile_definitions(chiaki-lib PRIVATE CHIAKI_PLATFORM_IOS=1)

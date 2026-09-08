@@ -112,11 +112,11 @@ static bool state_finished_cond_check(void *user)
 	return senkusha->state_finished || senkusha->should_stop;
 }
 
-static bool senkusha_is_cloud_psnow_preflight(ChiakiSenkusha *senkusha)
+static bool senkusha_is_cloud_preflight(ChiakiSenkusha *senkusha)
 {
 	ChiakiSession *session = senkusha->session;
-	return session->connect_info.cloud_direct
-		&& session->connect_info.cloud_takion_protocol_version == 9
+	return session->connect_info.cloud_takion_protocol_version == 9
+		&& session->connect_info.stream_port != 0
 		&& session->connect_info.cloud_launch_spec_b64
 		&& *session->connect_info.cloud_launch_spec_b64;
 }
@@ -125,7 +125,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_senkusha_run(ChiakiSenkusha *senkusha, uint
 {
 	ChiakiSession *session = senkusha->session;
 	ChiakiErrorCode err;
-	bool cloud_psnow_preflight = senkusha_is_cloud_psnow_preflight(senkusha);
+	bool cloud_preflight = senkusha_is_cloud_preflight(senkusha);
 
 	err = chiaki_mutex_lock(&senkusha->state_mutex);
 	assert(err == CHIAKI_ERR_SUCCESS);
@@ -160,25 +160,26 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_senkusha_run(ChiakiSenkusha *senkusha, uint
 		}
 
 		memcpy(takion_info.sa, session->connect_info.host_addrinfo_selected->ai_addr, takion_info.sa_len);
-		uint16_t senkusha_port = (cloud_psnow_preflight && session->connect_info.stream_port)
+		uint16_t senkusha_port = (cloud_preflight && session->connect_info.stream_port)
 			? session->connect_info.stream_port
 			: SENKUSHA_PORT;
 		err = set_port(takion_info.sa, htons(senkusha_port));
 		assert(err == CHIAKI_ERR_SUCCESS);
-		if(cloud_psnow_preflight)
-			CHIAKI_LOGI(session->log, "Cloud-direct PS Now preflight Senkusha -> %s:%u",
-				session->connect_info.hostname, (unsigned)senkusha_port);
+		if(cloud_preflight)
+			CHIAKI_LOGI(session->log, "Cloud preflight Senkusha -> %s:%u wrapper=%s",
+				session->connect_info.hostname, (unsigned)senkusha_port,
+				session->connect_info.cloud_direct ? "enabled" : "none");
 	}
 	else
 		takion_info.close_socket = false;
-	takion_info.ip_dontfrag = !cloud_psnow_preflight;
+	takion_info.ip_dontfrag = !cloud_preflight;
 
 	takion_info.enable_crypt = false;
 	takion_info.disable_audio_video = false;
 	takion_info.enable_dualsense = session->connect_info.enable_dualsense;
-	takion_info.protocol_version = cloud_psnow_preflight ? 9 : 7;
-	takion_info.cloud_direct = cloud_psnow_preflight;
-	takion_info.cloud_psn_wrapper_type = cloud_psnow_preflight
+	takion_info.protocol_version = cloud_preflight ? 9 : 7;
+	takion_info.cloud_direct = cloud_preflight && session->connect_info.cloud_direct;
+	takion_info.cloud_psn_wrapper_type = takion_info.cloud_direct
 		? session->connect_info.cloud_psn_wrapper_type
 		: 0;
 
@@ -217,9 +218,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_senkusha_run(ChiakiSenkusha *senkusha, uint
 	if(connect_rtt_us == 0)
 		connect_rtt_us = 1;
 
-	if(cloud_psnow_preflight)
+	if(cloud_preflight)
 	{
-		CHIAKI_LOGI(session->log, "Cloud-direct PS Now preflight: sending Senkusha cloud ping BIG");
+		CHIAKI_LOGI(session->log, "Cloud preflight: sending Senkusha cloud ping BIG");
 
 		senkusha->state = STATE_IDLE;
 		senkusha->state_finished = false;
@@ -227,7 +228,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_senkusha_run(ChiakiSenkusha *senkusha, uint
 		err = senkusha_send_big(senkusha);
 		if(err != CHIAKI_ERR_SUCCESS)
 		{
-			CHIAKI_LOGE(session->log, "Cloud-direct PS Now preflight failed to send Senkusha BIG");
+			CHIAKI_LOGE(session->log, "Cloud preflight failed to send Senkusha BIG");
 			QUIT(quit_takion);
 		}
 
@@ -238,7 +239,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_senkusha_run(ChiakiSenkusha *senkusha, uint
 			err = CHIAKI_ERR_CANCELED;
 			QUIT(quit_takion);
 		}
-		CHIAKI_LOGI(session->log, "Cloud-direct PS Now preflight: waited 600ms after Senkusha BIG");
+		CHIAKI_LOGI(session->log, "Cloud preflight: waited 600ms after Senkusha BIG");
 		if(rtt_us)
 			*rtt_us = connect_rtt_us;
 		if(mtu_in && *mtu_in == 0)
@@ -912,8 +913,8 @@ static ChiakiErrorCode senkusha_send_big(ChiakiSenkusha *senkusha)
 	msg.type = tkproto_TakionMessage_PayloadType_BIG;
 	msg.has_big_payload = true;
 	msg.big_payload.client_version = 9;
-	bool cloud_psnow_preflight = senkusha_is_cloud_psnow_preflight(senkusha);
-	msg.big_payload.session_key.arg = cloud_psnow_preflight
+	bool cloud_preflight = senkusha_is_cloud_preflight(senkusha);
+	msg.big_payload.session_key.arg = cloud_preflight
 		? (void *)senkusha->session->connect_info.cloud_launch_spec_b64
 		: (void *)"";
 	msg.big_payload.session_key.funcs.encode = chiaki_pb_encode_string;
@@ -922,7 +923,7 @@ static ChiakiErrorCode senkusha_send_big(ChiakiSenkusha *senkusha)
 	msg.big_payload.encrypted_key.arg = "";
 	msg.big_payload.encrypted_key.funcs.encode = chiaki_pb_encode_string;
 
-	if(cloud_psnow_preflight)
+	if(cloud_preflight)
 		return senkusha_send_cloud_psnow_preflight_big(senkusha, &msg);
 
 	uint8_t buf[12];

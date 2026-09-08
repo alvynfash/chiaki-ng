@@ -32,6 +32,8 @@ extern "C" {
  * Inputs for one provisioning attempt. All strings are borrowed (the caller
  * owns them and they must outlive the call). NULL is treated as "".
  */
+typedef void (*ChiakiCloudProvisionProgressCallback)(const char *stage, void *user);
+
 typedef struct chiaki_cloud_provision_config_t
 {
 	const char *service_type;         /**< "psnow" (PS3/PS4) | "pscloud" (PS5) */
@@ -56,7 +58,7 @@ typedef struct chiaki_cloud_provision_config_t
 	int  bitrate_kbps;                /**< cloud stream bitrate (platform picks the per-service value) */
 
 	/** Progress callback: @p stage is a UI-ready string shown verbatim. May be NULL. */
-	void (*progress)(const char *stage, void *user);
+	ChiakiCloudProvisionProgressCallback progress;
 	/** Cancellation check, polled between steps. May be NULL. */
 	bool (*is_cancelled)(void *user);
 	void *user;                       /**< opaque, passed back to the callbacks */
@@ -105,6 +107,18 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloud_provision_session(
  */
 CHIAKI_EXPORT ChiakiErrorCode chiaki_cloud_provision_session_json(
 	const char *config_json, char **result_json);
+
+/**
+ * JSON boundary with progress reporting. This is equivalent to
+ * chiaki_cloud_provision_session_json(), but forwards native provisioning
+ * stages through @p progress. The callback runs synchronously on the calling
+ * thread; hosts must marshal UI updates to their main thread.
+ */
+CHIAKI_EXPORT ChiakiErrorCode chiaki_cloud_provision_session_json_with_progress(
+	const char *config_json,
+	char **result_json,
+	ChiakiCloudProvisionProgressCallback progress,
+	void *user);
 
 CHIAKI_EXPORT void chiaki_cloud_provision_json_free(char *json);
 

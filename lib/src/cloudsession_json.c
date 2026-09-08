@@ -47,8 +47,11 @@ static char *result_to_json(const ChiakiCloudProvisionResult *result)
 	return copy;
 }
 
-CHIAKI_EXPORT ChiakiErrorCode chiaki_cloud_provision_session_json(
-	const char *config_json, char **result_json)
+static ChiakiErrorCode cloud_provision_session_json(
+	const char *config_json,
+	char **result_json,
+	ChiakiCloudProvisionProgressCallback progress,
+	void *user)
 {
 	if(result_json) *result_json = NULL;
 	if(!config_json || !result_json)
@@ -78,6 +81,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloud_provision_session_json(
 	cfg.game_language = json_string(input, "gameLanguage");
 	cfg.resolution = cc_json_int(input, "resolution");
 	cfg.bitrate_kbps = cc_json_int(input, "bitrateKbps");
+	cfg.progress = progress;
+	cfg.user = user;
 
 	ChiakiCloudProvisionResult result;
 	ChiakiLog log;
@@ -88,6 +93,21 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloud_provision_session_json(
 	chiaki_cloud_provision_result_fini(&result);
 	json_object_put(input);
 	return *result_json ? err : CHIAKI_ERR_MEMORY;
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_cloud_provision_session_json(
+	const char *config_json, char **result_json)
+{
+	return cloud_provision_session_json(config_json, result_json, NULL, NULL);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_cloud_provision_session_json_with_progress(
+	const char *config_json,
+	char **result_json,
+	ChiakiCloudProvisionProgressCallback progress,
+	void *user)
+{
+	return cloud_provision_session_json(config_json, result_json, progress, user);
 }
 
 CHIAKI_EXPORT void chiaki_cloud_provision_json_free(char *json)

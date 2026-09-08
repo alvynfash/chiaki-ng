@@ -30,6 +30,7 @@ target_link_libraries(fash PRIVATE
 # pass includes the provisioning and catalog objects in Fash.framework.
 target_link_options(fash PRIVATE
   "LINKER:-u,_chiaki_cloud_provision_session_json"
+  "LINKER:-u,_chiaki_cloud_provision_session_json_with_progress"
   "LINKER:-u,_chiaki_cloud_provision_json_free"
   "LINKER:-u,_chiaki_cloudcatalog_fetch_unified_json"
   "LINKER:-u,_chiaki_cloudcatalog_json_free")
