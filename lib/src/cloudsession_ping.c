@@ -53,8 +53,8 @@ ChiakiErrorCode cc_ping_datacenter(ChiakiLog *log, const char *public_ip, int po
 		if(err == CHIAKI_ERR_SUCCESS && rtt_us != 0)
 		{
 			if(out_rtt_us) *out_rtt_us = (int64_t)rtt_us;
-			if(out_mtu_in) *out_mtu_in = mtu_in;
-			if(out_mtu_out) *out_mtu_out = mtu_out;
+			if(out_mtu_in) *out_mtu_in = mtu_in > 0 ? mtu_in : 1454;
+			if(out_mtu_out) *out_mtu_out = mtu_out > 0 ? mtu_out : 1254;
 		}
 	}
 

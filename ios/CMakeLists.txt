@@ -24,4 +24,13 @@ target_link_libraries(fash PRIVATE
 	"-framework CoreVideo"
 	"-framework Foundation"
 	"-framework VideoToolbox")
+
+# These cloud entry points are loaded by Dart FFI rather than referenced by
+# the Objective-C++ runtime. Keep them as linker roots so Apple's dead-strip
+# pass includes the provisioning and catalog objects in Fash.framework.
+target_link_options(fash PRIVATE
+  "LINKER:-u,_chiaki_cloud_provision_session_json"
+  "LINKER:-u,_chiaki_cloud_provision_json_free"
+  "LINKER:-u,_chiaki_cloudcatalog_fetch_unified_json"
+  "LINKER:-u,_chiaki_cloudcatalog_json_free")
 target_include_directories(fash PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -144,6 +144,10 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_senkusha_run(ChiakiSenkusha *senkusha, uint
 	ChiakiTakionConnectInfo takion_info;
 	memset(&takion_info, 0, sizeof(takion_info));
 	takion_info.log = senkusha->log;
+	// Cloud preflight does not run the regular echo RTT loop below. Keep the
+	// completed Takion handshake duration as its reachability measurement so
+	// cloud datacenter probes do not look like failures to their caller.
+	uint64_t connect_start_us = chiaki_time_now_monotonic_us();
 	if(!socket)
 	{
 		takion_info.close_socket = true;
@@ -209,6 +213,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_senkusha_run(ChiakiSenkusha *senkusha, uint
 
 		QUIT(quit_takion);
 	}
+	uint64_t connect_rtt_us = chiaki_time_now_monotonic_us() - connect_start_us;
+	if(connect_rtt_us == 0)
+		connect_rtt_us = 1;
 
 	if(cloud_psnow_preflight)
 	{
@@ -232,6 +239,12 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_senkusha_run(ChiakiSenkusha *senkusha, uint
 			QUIT(quit_takion);
 		}
 		CHIAKI_LOGI(session->log, "Cloud-direct PS Now preflight: waited 600ms after Senkusha BIG");
+		if(rtt_us)
+			*rtt_us = connect_rtt_us;
+		if(mtu_in && *mtu_in == 0)
+			*mtu_in = 1454;
+		if(mtu_out && *mtu_out == 0)
+			*mtu_out = 1254;
 		err = CHIAKI_ERR_SUCCESS;
 		goto disconnect;
 	}

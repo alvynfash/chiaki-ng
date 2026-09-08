@@ -66,7 +66,7 @@ typedef struct
 	struct json_object *selected_ping; // borrowed ref into ping_results
 	char selected_datacenter[128];
 	int selected_dc_port;
-	bool ping_timeout;          // best measured RTT exceeded the auto-select gate (>80ms)
+	bool datacenter_probe_failed;
 	bool forced_dc_unavailable; // settings-forced datacenter not in this title's list
 } GaikaiCtx;
 
@@ -949,19 +949,20 @@ static ChiakiErrorCode gk_step12_select(GaikaiCtx *c)
 	{
 		c->selected_ping = json_object_array_get_idx(c->ping_results, 0); // lowest RTT
 		bool measured = cc_json_bool(c->selected_ping, "measured");
-		int rtt_ms = cc_json_int(c->selected_ping, "rtt");
 		if(!measured)
 		{
-			// Rows are RTT-sorted, so an unmeasured best row means no ping succeeded.
+			// Gaikai expects real Senkusha measurements in pingResults. Sending an
+			// invented endpoint after every probe timed out is rejected by /select.
 			CHIAKI_LOGE(c->log, "[GAIKAI] all datacenter pings failed");
-			c->ping_timeout = true;
-			return CHIAKI_ERR_UNKNOWN; // ping-too-high / unreachable
+			c->datacenter_probe_failed = true;
+			return CHIAKI_ERR_UNKNOWN;
 		}
+		int rtt_ms = cc_json_int(c->selected_ping, "rtt");
 		if(rtt_ms > 80)
 		{
-			CHIAKI_LOGE(c->log, "[GAIKAI] best datacenter RTT %dms > 80ms", rtt_ms);
-			c->ping_timeout = true;
-			return CHIAKI_ERR_UNKNOWN; // ping-too-high
+			// RTT is a stream-quality signal, not a provisioning failure. The old
+			// 80ms gate made valid long-distance/mobile connections impossible.
+			CHIAKI_LOGW(c->log, "[GAIKAI] best datacenter RTT %dms; continuing with measured endpoint", rtt_ms);
 		}
 	}
 	snprintf(c->selected_datacenter, sizeof(c->selected_datacenter), "%s", cc_json_str(c->selected_ping, "dataCenter"));
@@ -1153,24 +1154,33 @@ ChiakiErrorCode cc_gaikai_allocate(ChiakiLog *log,
 	c.spec = gk_build_spec(&c, entitlement_id ? entitlement_id : "");
 
 	// Poll cancellation between the early steps too (header contract); steps 10,
-	// 11, and 13 poll internally around their retry/wait loops.
+	// 11, and 13 poll internally around their retry/wait loops. Keep the failed
+	// stage so a native error cannot collapse into an opaque numeric code in Dart.
 	bool psplus_err = false;
+	const char *failed_step = NULL;
 	ChiakiErrorCode e = gk_cancelled(&c) ? CHIAKI_ERR_CANCELED : gk_step0_client_ids(&c);
+	if(e != CHIAKI_ERR_SUCCESS) failed_step = "client IDs";
 	if(e == CHIAKI_ERR_SUCCESS && gk_cancelled(&c)) e = CHIAKI_ERR_CANCELED;
-	if(e == CHIAKI_ERR_SUCCESS) e = gk_step7_config(&c);
+	if(e != CHIAKI_ERR_SUCCESS && !failed_step) failed_step = "cancellation after client IDs";
+	if(e == CHIAKI_ERR_SUCCESS) { e = gk_step7_config(&c); if(e != CHIAKI_ERR_SUCCESS) failed_step = "configuration"; }
 	if(e == CHIAKI_ERR_SUCCESS && gk_cancelled(&c)) e = CHIAKI_ERR_CANCELED;
-	if(e == CHIAKI_ERR_SUCCESS) e = gk_step8_start(&c, out);
+	if(e != CHIAKI_ERR_SUCCESS && !failed_step) failed_step = "cancellation after configuration";
+	if(e == CHIAKI_ERR_SUCCESS) { e = gk_step8_start(&c, out); if(e != CHIAKI_ERR_SUCCESS) failed_step = "session start"; }
 	if(e == CHIAKI_ERR_SUCCESS && gk_cancelled(&c)) e = CHIAKI_ERR_CANCELED;
-	if(e == CHIAKI_ERR_SUCCESS) e = gk_step8a_gk_authcode(&c);
+	if(e != CHIAKI_ERR_SUCCESS && !failed_step) failed_step = "cancellation after session start";
+	if(e == CHIAKI_ERR_SUCCESS) { e = gk_step8a_gk_authcode(&c); if(e != CHIAKI_ERR_SUCCESS) failed_step = "cloud authorization"; }
 	if(e == CHIAKI_ERR_SUCCESS && gk_cancelled(&c)) e = CHIAKI_ERR_CANCELED;
-	if(e == CHIAKI_ERR_SUCCESS) e = gk_step8b_server_authcode(&c);
+	if(e != CHIAKI_ERR_SUCCESS && !failed_step) failed_step = "cancellation after cloud authorization";
+	if(e == CHIAKI_ERR_SUCCESS) { e = gk_step8b_server_authcode(&c); if(e != CHIAKI_ERR_SUCCESS) failed_step = "server authorization"; }
 	if(e == CHIAKI_ERR_SUCCESS && gk_cancelled(&c)) e = CHIAKI_ERR_CANCELED;
-	if(e == CHIAKI_ERR_SUCCESS) e = gk_step9_authorize(&c, out, &psplus_err);
+	if(e != CHIAKI_ERR_SUCCESS && !failed_step) failed_step = "cancellation after server authorization";
+	if(e == CHIAKI_ERR_SUCCESS) { e = gk_step9_authorize(&c, out, &psplus_err); if(e != CHIAKI_ERR_SUCCESS) failed_step = "Gaikai authorization"; }
 	if(e == CHIAKI_ERR_SUCCESS && gk_cancelled(&c)) e = CHIAKI_ERR_CANCELED;
-	if(e == CHIAKI_ERR_SUCCESS) e = gk_step10_lock(&c);
-	if(e == CHIAKI_ERR_SUCCESS) e = gk_step11_datacenters(&c);
-	if(e == CHIAKI_ERR_SUCCESS) e = gk_step12_select(&c);
-	if(e == CHIAKI_ERR_SUCCESS) e = gk_step13_allocate(&c, out);
+	if(e != CHIAKI_ERR_SUCCESS && !failed_step) failed_step = "cancellation after Gaikai authorization";
+	if(e == CHIAKI_ERR_SUCCESS) { e = gk_step10_lock(&c); if(e != CHIAKI_ERR_SUCCESS) failed_step = "session lock"; }
+	if(e == CHIAKI_ERR_SUCCESS) { e = gk_step11_datacenters(&c); if(e != CHIAKI_ERR_SUCCESS) failed_step = "datacenter discovery"; }
+	if(e == CHIAKI_ERR_SUCCESS) { e = gk_step12_select(&c); if(e != CHIAKI_ERR_SUCCESS) failed_step = "datacenter selection"; }
+	if(e == CHIAKI_ERR_SUCCESS) { e = gk_step13_allocate(&c, out); if(e != CHIAKI_ERR_SUCCESS) failed_step = "stream allocation"; }
 
 	// Return the full datacenter list (merged with prior stored RTTs) for the
 	// Settings picker -- the platform persists this verbatim, like the old code.
@@ -1181,13 +1191,20 @@ ChiakiErrorCode cc_gaikai_allocate(ChiakiLog *log,
 	}
 	if(psplus_err && !out->error_message)
 		out->error_message = strdup("PS_PLUS_SUBSCRIPTION_REQUIRED");
-	if(c.ping_timeout && !out->error_message)
-		out->error_message = strdup("PING_TIMEOUT");
 	if(c.forced_dc_unavailable && !out->error_message)
 	{
 		char m[128];
 		snprintf(m, sizeof(m), "Selected datacenter '%s' not available",
 			cfg->forced_datacenter ? cfg->forced_datacenter : "");
+		out->error_message = strdup(m);
+	}
+	if(c.datacenter_probe_failed && !out->error_message)
+		out->error_message = strdup("Unable to reach any PlayStation streaming datacenter. Check the network and try again.");
+	if(e != CHIAKI_ERR_SUCCESS && !out->error_message)
+	{
+		char m[192];
+		snprintf(m, sizeof(m), "Native cloud provisioning failed at %s (code %d).",
+			failed_step ? failed_step : "an unknown stage", (int)e);
 		out->error_message = strdup(m);
 	}
 
