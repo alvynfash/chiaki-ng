@@ -3,6 +3,7 @@
 // String-oriented host boundary for the shared unified catalog flow.
 
 #include <chiaki/cloudcatalog.h>
+#include <chiaki/thread.h>
 
 #include "cloudcatalog_internal.h"
 
@@ -10,6 +11,146 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
+
+typedef struct cc_catalog_query_cache_t
+{
+	struct json_object *catalog;
+	char *cache_dir;
+	char *locale;
+	char *npsso;
+	char *scope;
+	time_t stored_at;
+} CCCatalogQueryCache;
+
+static CCCatalogQueryCache catalog_query_cache;
+static ChiakiMutex catalog_query_cache_mutex;
+static bool catalog_query_cache_mutex_ready;
+
+#ifdef _WIN32
+static INIT_ONCE catalog_query_cache_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK catalog_query_cache_init_once(
+	PINIT_ONCE once, PVOID parameter, PVOID *context)
+{
+	(void)once;
+	(void)parameter;
+	(void)context;
+	catalog_query_cache_mutex_ready =
+		chiaki_mutex_init(&catalog_query_cache_mutex, false) == CHIAKI_ERR_SUCCESS;
+	return TRUE;
+}
+
+static bool catalog_query_cache_lock(void)
+{
+	InitOnceExecuteOnce(&catalog_query_cache_once,
+		catalog_query_cache_init_once, NULL, NULL);
+	if(!catalog_query_cache_mutex_ready)
+		return false;
+	return chiaki_mutex_lock(&catalog_query_cache_mutex) == CHIAKI_ERR_SUCCESS;
+}
+#else
+static pthread_once_t catalog_query_cache_once = PTHREAD_ONCE_INIT;
+
+static void catalog_query_cache_init_once(void)
+{
+	catalog_query_cache_mutex_ready =
+		chiaki_mutex_init(&catalog_query_cache_mutex, false) == CHIAKI_ERR_SUCCESS;
+}
+
+static bool catalog_query_cache_lock(void)
+{
+	pthread_once(&catalog_query_cache_once, catalog_query_cache_init_once);
+	if(!catalog_query_cache_mutex_ready)
+		return false;
+	return chiaki_mutex_lock(&catalog_query_cache_mutex) == CHIAKI_ERR_SUCCESS;
+}
+#endif
+
+static void catalog_query_cache_clear_locked(void)
+{
+	if(catalog_query_cache.catalog)
+		json_object_put(catalog_query_cache.catalog);
+	free(catalog_query_cache.cache_dir);
+	free(catalog_query_cache.locale);
+	free(catalog_query_cache.npsso);
+	free(catalog_query_cache.scope);
+	memset(&catalog_query_cache, 0, sizeof(catalog_query_cache));
+}
+
+static bool catalog_query_cache_scope_matches(const char *cached, const char *requested)
+{
+	return cached && requested
+		&& (strcmp(cached, "all") == 0 || strcmp(cached, requested) == 0);
+}
+
+static struct json_object *catalog_query_cache_get(
+	const ChiakiCloudCatalogConfig *config)
+{
+	if(!catalog_query_cache_lock())
+		return NULL;
+	const char *locale = config->locale && *config->locale ? config->locale : "en-US";
+	const char *npsso = config->npsso ? config->npsso : "";
+	const char *scope = config->scope && *config->scope ? config->scope : "all";
+	const time_t now = time(NULL);
+	const bool fresh = catalog_query_cache.stored_at > 0
+		&& difftime(now, catalog_query_cache.stored_at) * 1000 <= CC_CACHE_TTL_MS;
+	const bool matches = fresh && catalog_query_cache.catalog
+		&& catalog_query_cache.cache_dir
+		&& strcmp(catalog_query_cache.cache_dir, config->cache_dir) == 0
+		&& catalog_query_cache.locale
+		&& strcmp(catalog_query_cache.locale, locale) == 0
+		&& catalog_query_cache.npsso
+		&& strcmp(catalog_query_cache.npsso, npsso) == 0
+		&& catalog_query_cache_scope_matches(catalog_query_cache.scope, scope);
+	struct json_object *catalog = matches
+		? json_object_get(catalog_query_cache.catalog) : NULL;
+	if(!fresh && catalog_query_cache.catalog)
+		catalog_query_cache_clear_locked();
+	chiaki_mutex_unlock(&catalog_query_cache_mutex);
+	return catalog;
+}
+
+static void catalog_query_cache_put(
+	const ChiakiCloudCatalogConfig *config, struct json_object *catalog)
+{
+	if(!catalog || !catalog_query_cache_lock())
+		return;
+	const char *locale = config->locale && *config->locale ? config->locale : "en-US";
+	const char *npsso = config->npsso ? config->npsso : "";
+	const char *scope = config->scope && *config->scope ? config->scope : "all";
+	char *cache_dir_copy = strdup(config->cache_dir);
+	char *locale_copy = strdup(locale);
+	char *npsso_copy = strdup(npsso);
+	char *scope_copy = strdup(scope);
+	if(!cache_dir_copy || !locale_copy || !npsso_copy || !scope_copy)
+	{
+		free(cache_dir_copy);
+		free(locale_copy);
+		free(npsso_copy);
+		free(scope_copy);
+		chiaki_mutex_unlock(&catalog_query_cache_mutex);
+		return;
+	}
+	catalog_query_cache_clear_locked();
+	catalog_query_cache.catalog = json_object_get(catalog);
+	catalog_query_cache.cache_dir = cache_dir_copy;
+	catalog_query_cache.locale = locale_copy;
+	catalog_query_cache.npsso = npsso_copy;
+	catalog_query_cache.scope = scope_copy;
+	catalog_query_cache.stored_at = time(NULL);
+	chiaki_mutex_unlock(&catalog_query_cache_mutex);
+}
+
+void cc_catalog_query_cache_invalidate(const char *cache_dir)
+{
+	if(!catalog_query_cache_lock())
+		return;
+	if(!cache_dir || (catalog_query_cache.cache_dir
+		&& strcmp(catalog_query_cache.cache_dir, cache_dir) == 0))
+		catalog_query_cache_clear_locked();
+	chiaki_mutex_unlock(&catalog_query_cache_mutex);
+}
 
 static bool array_contains_ci(struct json_object *array, const char *value)
 {
@@ -202,13 +343,37 @@ static void collect_genres(struct json_object *game, struct json_object *genres)
 	}
 }
 
+static bool is_projected_catalog_field(const char *key)
+{
+	return strcmp(key, "games") == 0 || strcmp(key, "total") == 0
+		|| strcmp(key, "availablePlatforms") == 0
+		|| strcmp(key, "availableGenres") == 0
+		|| strcmp(key, "availableCatalogs") == 0;
+}
+
 // Pylux's CloudPlayView filtering and sorting, moved to the shared native JSON
 // boundary so paged clients never need the complete catalog in their UI runtime.
-static void apply_catalog_query(struct json_object *catalog, struct json_object *input)
+// The source is immutable: each request only retains the selected page and the
+// small envelope fields, allowing the parsed canonical catalog to be reused.
+static struct json_object *build_catalog_query(
+	struct json_object *catalog, struct json_object *input)
 {
+	struct json_object *projected_catalog = json_object_new_object();
+	if(!projected_catalog)
+		return NULL;
+	json_object_object_foreach(catalog, key, value)
+	{
+		if(!is_projected_catalog_field(key))
+			json_object_object_add(projected_catalog, key, json_object_get(value));
+	}
+
 	struct json_object *games = cc_json_arr(catalog, "games");
 	if(!games)
-		return;
+	{
+		json_object_object_add(projected_catalog, "games", json_object_new_array());
+		json_object_object_add(projected_catalog, "total", json_object_new_int(0));
+		return projected_catalog;
+	}
 
 	struct json_object *available_platforms = json_object_new_array();
 	struct json_object *available_genres = json_object_new_array();
@@ -259,14 +424,13 @@ static void apply_catalog_query(struct json_object *catalog, struct json_object 
 		json_object_array_add(page,
 			json_object_get(json_object_array_get_idx(filtered, (size_t)i)));
 
-	json_object_object_del(catalog, "games");
-	json_object_object_add(catalog, "games", page);
-	json_object_object_del(catalog, "total");
-	json_object_object_add(catalog, "total", json_object_new_int(total));
-	json_object_object_add(catalog, "availablePlatforms", available_platforms);
-	json_object_object_add(catalog, "availableGenres", available_genres);
-	json_object_object_add(catalog, "availableCatalogs", available_catalogs);
+	json_object_object_add(projected_catalog, "games", page);
+	json_object_object_add(projected_catalog, "total", json_object_new_int(total));
+	json_object_object_add(projected_catalog, "availablePlatforms", available_platforms);
+	json_object_object_add(projected_catalog, "availableGenres", available_genres);
+	json_object_object_add(projected_catalog, "availableCatalogs", available_catalogs);
 	json_object_put(filtered);
+	return projected_catalog;
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified_json(
@@ -293,34 +457,47 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified_json(
 	config.force_refresh = cc_json_bool(input, "forceRefresh");
 	config.scope = cc_json_str(input, "scope");
 
-	ChiakiLog log;
-	chiaki_log_init(&log, CHIAKI_LOG_ALL, NULL, NULL);
 	ChiakiCloudCatalogResult result;
 	memset(&result, 0, sizeof(result));
-	const ChiakiErrorCode err =
-		chiaki_cloudcatalog_fetch_unified(&config, &result, &log);
+	ChiakiErrorCode err = CHIAKI_ERR_SUCCESS;
+	struct json_object *catalog = config.force_refresh
+		? NULL : catalog_query_cache_get(&config);
+	const bool memory_cache_hit = catalog != NULL;
+	if(config.force_refresh)
+		cc_catalog_query_cache_invalidate(config.cache_dir);
+	if(!catalog)
+	{
+		ChiakiLog log;
+		chiaki_log_init(&log, CHIAKI_LOG_ALL, NULL, NULL);
+		err = chiaki_cloudcatalog_fetch_unified(&config, &result, &log);
+		catalog = result.json ? json_tokener_parse(result.json) : NULL;
+		if(catalog && json_object_get_type(catalog) == json_type_object
+			&& err == CHIAKI_ERR_SUCCESS)
+			catalog_query_cache_put(&config, catalog);
+	}
 
 	struct json_object *output = json_object_new_object();
 	if(!output)
 	{
+		if(catalog)
+			json_object_put(catalog);
 		chiaki_cloudcatalog_result_fini(&result);
 		json_object_put(input);
 		return CHIAKI_ERR_MEMORY;
 	}
 	json_object_object_add(output, "err", json_object_new_int((int)err));
+	json_object_object_add(output, "memoryCacheHit",
+		json_object_new_boolean(memory_cache_hit));
 	json_object_object_add(output, "errorMessage",
 		json_object_new_string(result.error_message ? result.error_message : ""));
-	struct json_object *catalog = result.json
-		? json_tokener_parse(result.json) : NULL;
 	if(catalog && json_object_get_type(catalog) == json_type_object)
 	{
-		apply_catalog_query(catalog, input);
-		json_object_object_add(output, "catalog", catalog);
+		struct json_object *projected = build_catalog_query(catalog, input);
+		json_object_object_add(output, "catalog",
+			projected ? projected : json_object_new_null());
 	}
 	else
 	{
-		if(catalog)
-			json_object_put(catalog);
 		json_object_object_add(output, "catalog", json_object_new_null());
 	}
 
@@ -328,6 +505,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified_json(
 		json_object_to_json_string_ext(output, JSON_C_TO_STRING_PLAIN);
 	*result_json = encoded ? strdup(encoded) : NULL;
 	json_object_put(output);
+	if(catalog)
+		json_object_put(catalog);
 	chiaki_cloudcatalog_result_fini(&result);
 	json_object_put(input);
 	return *result_json ? err : CHIAKI_ERR_MEMORY;

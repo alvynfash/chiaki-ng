@@ -543,6 +543,7 @@ CHIAKI_EXPORT void chiaki_cloudcatalog_invalidate_cache(const char *cache_dir)
 {
 	if(!cache_dir)
 		return;
+	cc_catalog_query_cache_invalidate(cache_dir);
 	// Current keys + legacy keys, so invalidation also purges caches written by
 	// older builds (e.g. the pre-contract unified_catalog_v2).
 	static const char *const keys[] = {

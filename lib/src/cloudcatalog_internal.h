@@ -122,6 +122,9 @@ ChiakiErrorCode cc_cache_write(ChiakiLog *log, const char *cache_dir, const char
 /** Delete cache_dir/<key>.json. */
 void cc_cache_remove(const char *cache_dir, const char *key);
 
+/** Drop the parsed in-process catalog retained by the JSON query boundary. */
+void cc_catalog_query_cache_invalidate(const char *cache_dir);
+
 // ---------------------------------------------------------------------------
 // Merge / assembly (cloudcatalog_merge.c)
 // ---------------------------------------------------------------------------
