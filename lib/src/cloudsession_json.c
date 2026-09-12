@@ -9,6 +9,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __ANDROID__
+// The JSON boundary is called from a Dart worker isolate rather than the
+// Android JNI session wrapper. Reuse the Android logger so provisioning
+// diagnostics reach logcat instead of falling back to stdout.
+extern void log_cb_android(ChiakiLogLevel level, const char *msg, void *user);
+#endif
+
 static const char *json_string(struct json_object *obj, const char *key)
 {
 	return cc_json_str(obj, key);
@@ -86,7 +93,11 @@ static ChiakiErrorCode cloud_provision_session_json(
 
 	ChiakiCloudProvisionResult result;
 	ChiakiLog log;
+#ifdef __ANDROID__
+	chiaki_log_init(&log, CHIAKI_LOG_ALL & ~CHIAKI_LOG_VERBOSE, log_cb_android, NULL);
+#else
 	chiaki_log_init(&log, CHIAKI_LOG_ALL, NULL, NULL);
+#endif
 	ChiakiErrorCode err = chiaki_cloud_provision_session(&cfg, &result, &log);
 	result.err = err;
 	*result_json = result_to_json(&result);

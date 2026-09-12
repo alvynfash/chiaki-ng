@@ -1561,11 +1561,6 @@ static ChiakiErrorCode takion_handle_packet_mac(ChiakiTakion *takion, uint8_t ba
 	if(memcmp(mac_expected, mac, sizeof(mac)) != 0)
 	{
 		CHIAKI_LOGE(takion->log, "Takion packet MAC mismatch for packet type %#x with key_pos %#llx", base_type, key_pos);
-		chiaki_log_hexdump(takion->log, CHIAKI_LOG_ERROR, buf, buf_size);
-		CHIAKI_LOGV(takion->log, "GMAC:");
-		chiaki_log_hexdump(takion->log, CHIAKI_LOG_DEBUG, mac, sizeof(mac));
-		CHIAKI_LOGV(takion->log, "GMAC expected:");
-		chiaki_log_hexdump(takion->log, CHIAKI_LOG_DEBUG, mac_expected, sizeof(mac_expected));
 		return CHIAKI_ERR_INVALID_MAC;
 	}
 
@@ -1625,7 +1620,6 @@ static void takion_handle_packet(ChiakiTakion *takion, uint8_t *buf, size_t buf_
 			break;
 		default:
 			CHIAKI_LOGW(takion->log, "Takion packet with unknown type %#x received", base_type);
-			chiaki_log_hexdump(takion->log, CHIAKI_LOG_WARNING, buf, buf_size);
 			free(buf);
 			break;
 	}
@@ -1691,8 +1685,8 @@ static void takion_flush_data_queue(ChiakiTakion *takion)
 				&& data_type != CHIAKI_TAKION_MESSAGE_DATA_TYPE_TRIGGER_EFFECTS
 				&& data_type != CHIAKI_TAKION_MESSAGE_DATA_TYPE_PAD_INFO)
 		{
-			CHIAKI_LOGW(takion->log, "Takion received data with unexpected data type %#x", data_type);
-			chiaki_log_hexdump(takion->log, CHIAKI_LOG_WARNING, entry->packet_buf, entry->packet_size);
+			CHIAKI_LOGW(takion->log, "Takion received data with unexpected data type %#x packet_size=%zu",
+				data_type, entry->packet_size);
 		}
 		else if(takion->cb)
 		{

@@ -1474,4 +1474,3 @@ struct json_object *cc_assemble_unified_catalog(ChiakiLog *log, const CCAssemble
 	json_object_put(universe);
 	return out;
 }
-

@@ -5,6 +5,12 @@
 #include <curl/curl.h>
 
 #include <ctype.h>
+#ifdef __ANDROID__
+#include <dirent.h>
+#include <limits.h>
+#include <pthread.h>
+#include <sys/stat.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,6 +103,92 @@ static void log_verbose_redacted(ChiakiLog *log, const char *label, const char *
 	free(copy);
 }
 
+#ifdef __ANDROID__
+static pthread_once_t android_ca_bundle_once = PTHREAD_ONCE_INIT;
+static char *android_ca_bundle_data;
+static size_t android_ca_bundle_size;
+
+static bool android_ca_bundle_append_file(const char *directory, const char *name)
+{
+	char path[PATH_MAX];
+	if(snprintf(path, sizeof(path), "%s/%s", directory, name) >= (int)sizeof(path))
+		return false;
+	FILE *file = fopen(path, "rb");
+	if(!file)
+		return false;
+	if(fseek(file, 0, SEEK_END) != 0)
+	{
+		fclose(file);
+		return false;
+	}
+	long length = ftell(file);
+	if(length <= 0 || fseek(file, 0, SEEK_SET) != 0)
+	{
+		fclose(file);
+		return false;
+	}
+	char *next = realloc(android_ca_bundle_data,
+		android_ca_bundle_size + (size_t)length + 1);
+	if(!next)
+	{
+		fclose(file);
+		return false;
+	}
+	android_ca_bundle_data = next;
+	size_t read = fread(android_ca_bundle_data + android_ca_bundle_size,
+		1, (size_t)length, file);
+	fclose(file);
+	if(read != (size_t)length)
+		return false;
+	android_ca_bundle_size += read;
+	android_ca_bundle_data[android_ca_bundle_size] = 0;
+	return true;
+}
+
+static bool android_ca_bundle_load_directory(const char *directory)
+{
+	DIR *dir = opendir(directory);
+	if(!dir)
+		return false;
+	struct dirent *entry;
+	while((entry = readdir(dir)) != NULL)
+	{
+		if(entry->d_name[0] == '.')
+			continue;
+		android_ca_bundle_append_file(directory, entry->d_name);
+	}
+	closedir(dir);
+	return android_ca_bundle_size > 0;
+}
+
+static void android_ca_bundle_init(void)
+{
+	// Android exposes the same hashed PEM certificates through both locations
+	// on current releases. Prefer the system path and retain the Conscrypt APEX
+	// path for devices where the former is not mounted.
+	if(!android_ca_bundle_load_directory("/system/etc/security/cacerts"))
+	{
+		free(android_ca_bundle_data);
+		android_ca_bundle_data = NULL;
+		android_ca_bundle_size = 0;
+		android_ca_bundle_load_directory("/apex/com.android.conscrypt/cacerts");
+	}
+}
+
+static bool android_ca_bundle_configure(CURL *curl)
+{
+	pthread_once(&android_ca_bundle_once, android_ca_bundle_init);
+	if(!android_ca_bundle_data || android_ca_bundle_size == 0)
+		return false;
+	struct curl_blob blob = {
+		.data = android_ca_bundle_data,
+		.len = android_ca_bundle_size,
+		.flags = CURL_BLOB_COPY,
+	};
+	return curl_easy_setopt(curl, CURLOPT_CAINFO_BLOB, &blob) == CURLE_OK;
+}
+#endif
+
 static int cc_http_debug_cb(CURL *handle, curl_infotype type, char *data, size_t size, void *userptr)
 {
 	(void)handle;
@@ -139,6 +231,13 @@ static CURL *easy_init_logged(ChiakiLog *log)
 	const char *ca_bundle = getenv("CHIAKI_CA_BUNDLE");
 	if(ca_bundle && *ca_bundle)
 		curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle);
+#ifdef __ANDROID__
+	else if(!android_ca_bundle_configure(curl))
+		// The Android build uses the bundled OpenSSL backend, which cannot consult
+		// Android's Conscrypt trust manager directly. Use its hashed system CA
+		// directory as a fallback if the PEM bundle could not be assembled.
+		curl_easy_setopt(curl, CURLOPT_CAPATH, "/system/etc/security/cacerts");
+#endif
 
 	if(log && (log->level_mask & CHIAKI_LOG_VERBOSE))
 	{

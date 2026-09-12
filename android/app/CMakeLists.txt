@@ -26,6 +26,18 @@ endif()
 set_target_properties(chiaki-jni PROPERTIES OUTPUT_NAME fash)
 target_link_libraries(chiaki-jni chiaki-lib)
 
+# Dart opens the cloud-catalog and cloud-provisioning ABIs through FFI at
+# runtime, so no Android-native object references these functions directly.
+# Keep the archive members that define them when lld performs dead-code
+# elimination; otherwise the final libfash.so is missing the symbols even
+# though the sources were compiled successfully.
+target_link_options(chiaki-jni PRIVATE
+        "-Wl,--undefined=chiaki_cloud_provision_session_json"
+        "-Wl,--undefined=chiaki_cloud_provision_session_json_with_progress"
+        "-Wl,--undefined=chiaki_cloud_provision_json_free"
+        "-Wl,--undefined=chiaki_cloudcatalog_fetch_unified_json"
+        "-Wl,--undefined=chiaki_cloudcatalog_json_free")
+
 find_library(ANDROID_LIB_LOG log)
 find_library(ANDROID_LIB_MEDIANDK mediandk)
 find_library(ANDROID_LIB_ANDROID android)

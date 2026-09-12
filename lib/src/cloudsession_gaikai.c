@@ -455,7 +455,7 @@ static ChiakiErrorCode gk_step8_start(GaikaiCtx *c, ChiakiCloudProvisionResult *
 	free(h_ua); free(h_skey); json_object_put(wrap);
 	if(e != CHIAKI_ERR_SUCCESS || resp.status_code != 200)
 	{
-		CHIAKI_LOGE(c->log, "[GAIKAI] step8 start http %ld: %s", resp.status_code, resp.data ? resp.data : "");
+		CHIAKI_LOGE(c->log, "[GAIKAI] step8 start http %ld (response body omitted)", resp.status_code);
 		if(resp.data) { free(out->error_message); out->error_message = strdup(resp.data); }
 		cc_http_response_fini(&resp);
 		return CHIAKI_ERR_UNKNOWN;
@@ -536,7 +536,7 @@ static ChiakiErrorCode gk_step9_authorize(GaikaiCtx *c, ChiakiCloudProvisionResu
 		// noGameForEntitlementId fallback fires when Gaikai rejects an owned entitlement
 		// at authorize (step9), not just at start (step8) -- matches both originals.
 		else if(resp.data) { free(out->error_message); out->error_message = strdup(resp.data); }
-		CHIAKI_LOGE(c->log, "[GAIKAI] step9 authorize http %ld: %s", resp.status_code, resp.data ? resp.data : "");
+		CHIAKI_LOGE(c->log, "[GAIKAI] step9 authorize http %ld (response body omitted)", resp.status_code);
 		free(ev); cc_http_response_fini(&resp);
 		return CHIAKI_ERR_UNKNOWN;
 	}
@@ -668,7 +668,7 @@ static void *gk_ping_thread(void *arg)
 {
 	GkPingJob *j = (GkPingJob *)arg;
 	j->rtt_us = -1; j->mtu_in = 0; j->mtu_out = 0;
-	cc_ping_datacenter(&j->log, j->ip, j->port, j->session_key, j->service_type,
+	cc_ping_datacenter(&j->log, j->name, j->ip, j->port, j->session_key, j->service_type,
 		&j->rtt_us, &j->mtu_in, &j->mtu_out);
 	j->ok = (j->rtt_us > 0);
 	atomic_store(&j->done, 1);
@@ -1060,7 +1060,7 @@ static ChiakiErrorCode gk_step13_allocate(GaikaiCtx *c, ChiakiCloudProvisionResu
 			continue;
 		}
 		net_errors = 0; // request completed -> network is back
-		if(resp.status_code != 200) { CHIAKI_LOGE(c->log, "[GAIKAI] step13 allocate http %ld: %s", resp.status_code, resp.data ? resp.data : ""); cc_http_response_fini(&resp); return CHIAKI_ERR_UNKNOWN; }
+		if(resp.status_code != 200) { CHIAKI_LOGE(c->log, "[GAIKAI] step13 allocate http %ld (response body omitted)", resp.status_code); cc_http_response_fini(&resp); return CHIAKI_ERR_UNKNOWN; }
 		gk_update_session_key(c, &resp);
 		struct json_object *a = resp.data ? json_tokener_parse(resp.data) : NULL;
 		cc_http_response_fini(&resp);
