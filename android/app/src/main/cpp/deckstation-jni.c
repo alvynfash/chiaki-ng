@@ -25,6 +25,9 @@
 #define DS_TAG "DeckStationChiaki"
 #define DS_STREAM_STATS_VALUE_COUNT 15
 #define DS_STREAM_STATS_INTERVAL_US 1000000
+#define DS_HAPTICS_SAMPLE_RATE 3000
+#define DS_HAPTICS_CHANNELS 2
+#define DS_HAPTICS_FORMAT_S16 CHIAKI_HEADLESS_AUDIO_FORMAT_S16
 
 typedef struct deckstation_android_session_t
 {
@@ -44,6 +47,12 @@ typedef struct deckstation_android_session_t
 	bool video_init;
 	bool audio_init;
 	bool started;
+	bool haptics_enabled;
+	uint8_t haptic_intensity;
+	uint64_t last_haptic_pulse_us;
+	jmethodID haptics_start_method;
+	jmethodID haptics_pulse_method;
+	jmethodID haptics_stop_method;
 	atomic_bool local_stop_requested;
 	uint64_t video_samples;
 	uint64_t audio_frames;
@@ -56,6 +65,74 @@ typedef struct deckstation_android_session_t
 
 static pthread_mutex_t g_session_mutex = PTHREAD_MUTEX_INITIALIZER;
 static DeckStationAndroidSession *g_session = NULL;
+
+static JNIEnv *deckstation_haptics_env(DeckStationAndroidSession *session,
+	bool *did_attach)
+{
+	*did_attach = false;
+	JNIEnv *env = NULL;
+	if((*session->vm)->GetEnv(session->vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK)
+		return env;
+	if((*session->vm)->AttachCurrentThread(session->vm, (void **)&env, NULL) != JNI_OK)
+		return NULL;
+	*did_attach = true;
+	return env;
+}
+
+static void deckstation_haptics_stop(DeckStationAndroidSession *session)
+{
+	if(!session || !session->haptics_enabled || !session->haptics_stop_method)
+		return;
+	bool did_attach = false;
+	JNIEnv *env = deckstation_haptics_env(session, &did_attach);
+	if(env)
+	{
+		(*env)->CallVoidMethod(env, session->callback, session->haptics_stop_method);
+		if((*env)->ExceptionCheck(env))
+			(*env)->ExceptionClear(env);
+		if(did_attach)
+			(*session->vm)->DetachCurrentThread(session->vm);
+	}
+	session->haptics_enabled = false;
+}
+
+static void deckstation_haptics_pulse(DeckStationAndroidSession *session,
+	uint8_t low, uint8_t high, uint32_t duration_ms)
+{
+	if(!session || !session->haptics_enabled || !session->haptics_pulse_method)
+		return;
+	uint64_t now = chiaki_time_now_monotonic_us();
+	if(session->last_haptic_pulse_us != 0
+		&& now >= session->last_haptic_pulse_us
+		&& now - session->last_haptic_pulse_us < 25000)
+		return;
+	session->last_haptic_pulse_us = now;
+	uint8_t scale = session->haptic_intensity;
+	low = (uint8_t)((uint16_t)low * scale / 255U);
+	high = (uint8_t)((uint16_t)high * scale / 255U);
+	bool did_attach = false;
+	JNIEnv *env = deckstation_haptics_env(session, &did_attach);
+	if(env)
+	{
+		(*env)->CallVoidMethod(env, session->callback,
+			session->haptics_pulse_method, (jint)low, (jint)high, (jint)duration_ms);
+		if((*env)->ExceptionCheck(env))
+			(*env)->ExceptionClear(env);
+		if(did_attach)
+			(*session->vm)->DetachCurrentThread(session->vm);
+	}
+}
+
+static uint8_t deckstation_haptics_intensity_scale(uint8_t intensity)
+{
+	switch(intensity)
+	{
+		case 1: return 255;
+		case 2: return 170;
+		case 3: return 85;
+		default: return 0;
+	}
+}
 
 static void deckstation_log_cb(ChiakiLogLevel level, const char *message, void *user)
 {
@@ -175,12 +252,28 @@ static void deckstation_session_event(ChiakiEvent *event, void *user)
 		case CHIAKI_EVENT_CONNECTED:
 			deckstation_emit(session, "ready", "Chiaki session connected", 0, 0);
 			break;
-		case CHIAKI_EVENT_VIDEO_FEC_FAILURE:
+	case CHIAKI_EVENT_VIDEO_FEC_FAILURE:
 			deckstation_emit(session, "warning", "Video FEC failure",
 				(int64_t)event->video_fec_failure.frame_index,
 				event->video_fec_failure.idr_request_sent ? 1 : 0);
 			break;
+		case CHIAKI_EVENT_RUMBLE:
+			if(session->haptics_enabled)
+				deckstation_haptics_pulse(session, event->rumble.left,
+					event->rumble.right, 60);
+			break;
+		case CHIAKI_EVENT_TRIGGER_EFFECTS:
+			/* Android has no stable portable adaptive-trigger API. */
+			break;
+		case CHIAKI_EVENT_HAPTIC_INTENSITY:
+			if(session->haptics_enabled)
+				session->haptic_intensity = deckstation_haptics_intensity_scale(
+					event->intensity);
+			break;
+		case CHIAKI_EVENT_TRIGGER_INTENSITY:
+			break;
 		case CHIAKI_EVENT_QUIT:
+			deckstation_haptics_stop(session);
 			if(!atomic_load(&session->local_stop_requested))
 			{
 				deckstation_emit(session, "terminal",
@@ -231,6 +324,32 @@ static void deckstation_audio_frame(int16_t *buf, size_t samples_count, void *us
 	android_chiaki_audio_output_frame(buf, samples_count, session->audio_output);
 }
 
+static void deckstation_haptics_frame(uint8_t *buf, size_t buf_size, void *user)
+{
+	DeckStationAndroidSession *session = user;
+	if(!session || !session->haptics_enabled || !buf)
+		return;
+	const size_t frame_bytes = DS_HAPTICS_CHANNELS * sizeof(int16_t);
+	const size_t frames = buf_size / frame_bytes;
+	if(frames == 0)
+		return;
+	const size_t sampled_frames = frames > 1024 ? 1024 : frames;
+	uint64_t left_total = 0;
+	uint64_t right_total = 0;
+	for(size_t i = 0; i < sampled_frames; i++)
+	{
+		int16_t left = 0;
+		int16_t right = 0;
+		memcpy(&left, buf + i * frame_bytes, sizeof(left));
+		memcpy(&right, buf + i * frame_bytes + sizeof(left), sizeof(right));
+		left_total += left < 0 ? (uint32_t)(-(int32_t)left) : (uint32_t)left;
+		right_total += right < 0 ? (uint32_t)(-(int32_t)right) : (uint32_t)right;
+	}
+	deckstation_haptics_pulse(session,
+		(uint8_t)((left_total / sampled_frames) * 255U / 32767U),
+		(uint8_t)((right_total / sampled_frames) * 255U / 32767U), 40);
+}
+
 static int deckstation_hex_nibble(char value)
 {
 	if(value >= '0' && value <= '9') return value - '0';
@@ -262,6 +381,7 @@ static void deckstation_session_free(JNIEnv *env, DeckStationAndroidSession *ses
 {
 	if(!session)
 		return;
+	deckstation_haptics_stop(session);
 	if(session->started)
 	{
 		atomic_store(&session->local_stop_requested, true);
@@ -290,7 +410,7 @@ static jint deckstation_native_start(
 	jstring session_id_value, jstring launch_spec_value, jstring morning_value,
 	jstring regist_key_value, jint resolution, jint fps, jint bitrate, jint codec,
 	jboolean ps5, jboolean enable_dualsense, jboolean enable_keyboard,
-	jint takion_protocol_version, jint psn_wrapper_type)
+	jboolean enable_haptics, jint takion_protocol_version, jint psn_wrapper_type)
 {
 	if(!surface || !host_value || !session_id_value || !launch_spec_value || !morning_value)
 		return CHIAKI_ERR_INVALID_DATA;
@@ -322,6 +442,15 @@ static jint deckstation_native_start(
 	if(session->callback_method)
 		session->stats_callback_method = (*env)->GetMethodID(env, bridge_class,
 			"onNativeStreamStats", "([D)V");
+	if(session->callback)
+	{
+		session->haptics_start_method = (*env)->GetMethodID(env, bridge_class,
+			"onNativeHapticsStart", "(III)Z");
+		session->haptics_pulse_method = (*env)->GetMethodID(env, bridge_class,
+			"onNativeHapticsPulse", "(III)V");
+		session->haptics_stop_method = (*env)->GetMethodID(env, bridge_class,
+			"onNativeHapticsStop", "()V");
+	}
 	if((*env)->ExceptionCheck(env))
 		(*env)->ExceptionClear(env);
 	if(bridge_class)
@@ -333,6 +462,26 @@ static jint deckstation_native_start(
 		deckstation_session_free(env, session);
 		pthread_mutex_unlock(&g_session_mutex);
 		return CHIAKI_ERR_UNINITIALIZED;
+	}
+	session->haptic_intensity = 255;
+	if(enable_haptics && ps5 && session->haptics_start_method
+		&& session->haptics_pulse_method && session->haptics_stop_method)
+	{
+		bool did_attach = false;
+		JNIEnv *haptics_env = deckstation_haptics_env(session, &did_attach);
+		if(haptics_env)
+		{
+			session->haptics_enabled = (*haptics_env)->CallBooleanMethod(
+				haptics_env, session->callback, session->haptics_start_method,
+				DS_HAPTICS_SAMPLE_RATE, DS_HAPTICS_CHANNELS, DS_HAPTICS_FORMAT_S16) == JNI_TRUE;
+			if((*haptics_env)->ExceptionCheck(haptics_env))
+			{
+				(*haptics_env)->ExceptionClear(haptics_env);
+				session->haptics_enabled = false;
+			}
+			if(did_attach)
+				(*session->vm)->DetachCurrentThread(session->vm);
+		}
 	}
 
 	const char *host = (*env)->GetStringUTFChars(env, host_value, NULL);
@@ -412,6 +561,15 @@ static jint deckstation_native_start(
 		ChiakiAudioSink audio_sink;
 		android_chiaki_audio_decoder_get_sink(&session->audio_decoder, &audio_sink);
 		chiaki_session_set_audio_sink(&session->session, &audio_sink);
+		if(session->haptics_enabled)
+		{
+			ChiakiAudioSink haptics_sink = {
+				.user = session,
+				.header_cb = NULL,
+				.frame_cb = deckstation_haptics_frame,
+			};
+			chiaki_session_set_haptics_sink(&session->session, &haptics_sink);
+		}
 		err = chiaki_session_start(&session->session);
 		if(err == CHIAKI_ERR_SUCCESS)
 			session->started = true;
@@ -520,7 +678,7 @@ int deckstation_jni_register(JNIEnv *env)
 		{
 			"nativeStart",
 			"(Landroid/view/Surface;Ljava/lang/String;ILjava/lang/String;"
-			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IIIIZZZII)I",
+			"Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IIIIZZZZII)I",
 			(void *)deckstation_native_start,
 		},
 		{ "nativeStop", "()I", (void *)deckstation_native_stop },

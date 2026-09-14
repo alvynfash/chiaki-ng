@@ -5,8 +5,12 @@
 #include "deckstation-ios-video-decoder.hpp"
 
 #import <Foundation/Foundation.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <CoreHaptics/CoreHaptics.h>
+#import <GameController/GameController.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,6 +24,157 @@
 #include <chiaki/packetstats.h>
 #include <chiaki/session.h>
 #include <chiaki/time.h>
+
+@interface DeckStationIOSControllerHaptics : NSObject
+- (BOOL)start;
+- (BOOL)playAmplitude:(float)amplitude;
+- (void)stop;
+@end
+
+@implementation DeckStationIOSControllerHaptics
+{
+	NSLock *_lock;
+	CHHapticEngine *_engine;
+	BOOL _started;
+	NSTimeInterval _lastStartAttempt;
+}
+
+- (instancetype)init
+{
+	self = [super init];
+	if(self)
+	{
+		_lock = [[NSLock alloc] init];
+		[[NSNotificationCenter defaultCenter]
+			addObserver:self
+			selector:@selector(controllerDidConnect:)
+			name:GCControllerDidConnectNotification
+			object:nil];
+	}
+	return self;
+}
+
+- (void)dealloc
+{
+	[[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (BOOL)start
+{
+	if(@available(iOS 14.0, *))
+	{
+		[_lock lock];
+		if(_started)
+		{
+			[_lock unlock];
+			return YES;
+		}
+		const NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+		if(_lastStartAttempt != 0.0 && now - _lastStartAttempt < 1.0)
+		{
+			[_lock unlock];
+			return NO;
+		}
+		_lastStartAttempt = now;
+		[_lock unlock];
+
+		GCController *selected = nil;
+		for(GCController *controller in GCController.controllers)
+		{
+			if(controller.haptics)
+			{
+				selected = controller;
+				break;
+			}
+		}
+		if(!selected)
+			return NO;
+
+		CHHapticEngine *engine =
+			[selected.haptics createEngineWithLocality:GCHapticsLocalityDefault];
+		if(!engine)
+			return NO;
+		NSError *error = nil;
+		if(![engine startAndReturnError:&error])
+			return NO;
+
+		[_lock lock];
+		CHHapticEngine *previous = _engine;
+		_engine = engine;
+		_started = YES;
+		[_lock unlock];
+		if(previous)
+			[previous stopWithCompletionHandler:nil];
+		return YES;
+	}
+	return NO;
+}
+
+- (void)controllerDidConnect:(NSNotification *)notification
+{
+	(void)notification;
+	[_lock lock];
+	_lastStartAttempt = 0.0;
+	[_lock unlock];
+	[self start];
+}
+
+- (BOOL)playAmplitude:(float)amplitude
+{
+	if(amplitude <= 0.001f)
+		return YES;
+	[_lock lock];
+	CHHapticEngine *engine = _engine;
+	BOOL started = _started;
+	[_lock unlock];
+	if(!started || !engine)
+	{
+		if(![self start])
+			return NO;
+		[_lock lock];
+		engine = _engine;
+		started = _started;
+		[_lock unlock];
+	}
+	if(!started || !engine)
+		return NO;
+
+	const float level = std::max(0.0f, std::min(amplitude, 1.0f));
+	CHHapticEventParameter *intensity =
+		[[CHHapticEventParameter alloc]
+			initWithParameterID:CHHapticEventParameterIDHapticIntensity
+			value:level];
+	CHHapticEvent *event =
+		[[CHHapticEvent alloc]
+			initWithEventType:CHHapticEventTypeHapticContinuous
+			parameters:@[intensity]
+			relativeTime:0.0
+			duration:0.04];
+	NSError *error = nil;
+	CHHapticPattern *pattern =
+		[[CHHapticPattern alloc] initWithEvents:@[event]
+			parameters:@[] error:&error];
+	if(!pattern)
+		return NO;
+	id<CHHapticPatternPlayer> player =
+		[engine createPlayerWithPattern:pattern error:&error];
+	if(!player || ![player startAtTime:0 error:&error])
+		return NO;
+	return YES;
+}
+
+- (void)stop
+{
+	[_lock lock];
+	CHHapticEngine *engine = _engine;
+	_engine = nil;
+	_started = NO;
+	_lastStartAttempt = 0.0;
+	[_lock unlock];
+	if(engine)
+		[engine stopWithCompletionHandler:nil];
+}
+@end
 
 namespace
 {
@@ -51,6 +206,18 @@ struct RuntimeSession
 	std::atomic<uint64_t> video_decode_lost_frames{0};
 	std::atomic<uint64_t> video_decode_recovered_frames{0};
 	std::atomic<uint64_t> video_decode_gap_events{0};
+	bool haptics_enabled = false;
+	DeckStationIOSControllerHaptics *controller_haptics = nil;
+	std::atomic<bool> controller_haptics_started{false};
+	uint8_t haptic_intensity = 255;
+	uint64_t last_haptic_pulse_us = 0;
+	std::atomic<uint64_t> haptics_pcm_frame_count{0};
+	std::atomic<uint64_t> haptics_rumble_event_count{0};
+	std::atomic<uint64_t> haptics_pulse_count{0};
+	std::atomic<uint64_t> haptics_controller_play_count{0};
+	std::atomic<uint64_t> haptics_fallback_count{0};
+	std::atomic<bool> haptics_pcm_logged{false};
+	std::atomic<bool> haptics_output_logged{false};
 	uint64_t last_stats_emit_monotonic_us = 0;
 };
 
@@ -61,6 +228,66 @@ std::mutex session_mutex;
 RuntimeSession *active_session = nullptr;
 std::mutex variant_mutex;
 std::string controller_variant = "ds4:0";
+
+void haptics_pulse(RuntimeSession *runtime, uint8_t low, uint8_t high)
+{
+	if(!runtime || !runtime->haptics_enabled)
+		return;
+	const uint64_t now = chiaki_time_now_monotonic_us();
+	if(runtime->last_haptic_pulse_us != 0
+		&& now >= runtime->last_haptic_pulse_us
+		&& now - runtime->last_haptic_pulse_us < 25000)
+		return;
+	runtime->last_haptic_pulse_us = now;
+	runtime->haptics_pulse_count++;
+	const uint8_t level = static_cast<uint8_t>(
+		std::max(low, high) * runtime->haptic_intensity / 255U);
+	if(level > 0)
+	{
+		const bool controller_played = runtime->controller_haptics
+			&& [runtime->controller_haptics playAmplitude:
+				static_cast<float>(level) / 255.0f];
+		if(controller_played)
+		{
+			runtime->controller_haptics_started = true;
+			runtime->haptics_controller_play_count++;
+			if(!runtime->haptics_output_logged.exchange(true))
+				NSLog(@"[DeckStationHaptics] first controller output accepted");
+		}
+		else
+		{
+			runtime->haptics_fallback_count++;
+			if(!runtime->haptics_output_logged.exchange(true))
+				NSLog(@"[DeckStationHaptics] controller output unavailable; using device vibration");
+			AudioServicesPlaySystemSound(kSystemSoundID_Vibrate);
+		}
+	}
+}
+
+void haptics_frame(uint8_t *buf, size_t buf_size, void *user)
+{
+	auto *runtime = static_cast<RuntimeSession *>(user);
+	if(!runtime || !runtime->haptics_enabled || !buf)
+		return;
+	const size_t frames = buf_size / (2 * sizeof(int16_t));
+	if(frames == 0)
+		return;
+	runtime->haptics_pcm_frame_count++;
+	if(!runtime->haptics_pcm_logged.exchange(true))
+		NSLog(@"[DeckStationHaptics] first PCM frame bytes=%zu frames=%zu",
+			buf_size, frames);
+	const size_t sampled = std::min(frames, size_t(1024));
+	uint64_t total = 0;
+	for(size_t i = 0; i < sampled * 2; i++)
+	{
+		int16_t sample = 0;
+		std::memcpy(&sample, buf + i * sizeof(sample), sizeof(sample));
+		total += sample < 0 ? static_cast<uint32_t>(-static_cast<int32_t>(sample))
+			: static_cast<uint32_t>(sample);
+	}
+	haptics_pulse(runtime,
+		static_cast<uint8_t>((total / (sampled * 2)) * 255U / 32767U), 0);
+}
 
 void emit(RuntimeSession *runtime, const char *type, const char *detail,
 	int64_t value0 = 0, int64_t value1 = 0)
@@ -112,6 +339,13 @@ void emit_stream_stats(RuntimeSession *runtime)
 		static_cast<double>(runtime->video_decode_lost_frames.load()),
 		static_cast<double>(runtime->video_decode_recovered_frames.load()),
 		static_cast<double>(runtime->video_decode_gap_events.load()),
+		runtime->haptics_enabled ? 1.0 : 0.0,
+		runtime->controller_haptics_started.load() ? 1.0 : 0.0,
+		static_cast<double>(runtime->haptics_pcm_frame_count.load()),
+		static_cast<double>(runtime->haptics_rumble_event_count.load()),
+		static_cast<double>(runtime->haptics_pulse_count.load()),
+		static_cast<double>(runtime->haptics_controller_play_count.load()),
+		static_cast<double>(runtime->haptics_fallback_count.load()),
 	};
 	runtime->callbacks.stats(runtime->callbacks.user, values,
 		static_cast<int32_t>(sizeof(values) / sizeof(values[0])));
@@ -140,7 +374,23 @@ void session_event(ChiakiEvent *event, void *user)
 				(int64_t)event->video_fec_failure.frame_index,
 				event->video_fec_failure.idr_request_sent ? 1 : 0);
 			break;
+		case CHIAKI_EVENT_RUMBLE:
+			runtime->haptics_rumble_event_count++;
+			haptics_pulse(runtime, event->rumble.left, event->rumble.right);
+			break;
+		case CHIAKI_EVENT_HAPTIC_INTENSITY:
+			switch(event->intensity)
+			{
+				case 1: runtime->haptic_intensity = 255; break;
+				case 2: runtime->haptic_intensity = 170; break;
+				case 3: runtime->haptic_intensity = 85; break;
+				default: runtime->haptic_intensity = 0; break;
+			}
+			break;
 		case CHIAKI_EVENT_QUIT:
+			runtime->haptics_enabled = false;
+			if(runtime->controller_haptics)
+				[runtime->controller_haptics stop];
 			if(!runtime->local_stop_requested.load())
 				emit(runtime, "terminal",
 					event->quit.reason_str
@@ -250,9 +500,12 @@ void free_session(RuntimeSession *runtime)
 {
 	if(!runtime)
 		return;
+	runtime->haptics_enabled = false;
+	runtime->local_stop_requested = true;
+	if(runtime->controller_haptics)
+		[runtime->controller_haptics stop];
 	if(runtime->started)
 	{
-		runtime->local_stop_requested = true;
 		chiaki_session_stop(&runtime->session);
 		chiaki_session_join(&runtime->session);
 		runtime->started = false;
@@ -364,6 +617,18 @@ extern "C" int32_t deckstation_ios_runtime_start_json(const char *json_value)
 		error = chiaki_session_init(&runtime->session, &connect_info, &runtime->log);
 		if(error == CHIAKI_ERR_SUCCESS)
 			runtime->session_initialized = true;
+		runtime->haptics_enabled = bool_value(json, @"enableHaptics", false)
+			&& bool_value(json, @"ps5", true);
+		if(runtime->haptics_enabled)
+		{
+			runtime->controller_haptics =
+				[[DeckStationIOSControllerHaptics alloc] init];
+			runtime->controller_haptics_started =
+				[runtime->controller_haptics start];
+			NSLog(@"[DeckStationHaptics] enabled=1 controllerEngine=%d controllers=%lu",
+				runtime->controller_haptics_started.load() ? 1 : 0,
+				(unsigned long)GCController.controllers.count);
+		}
 		if(error == CHIAKI_ERR_SUCCESS)
 		{
 			chiaki_session_set_event_cb(&runtime->session, session_event, runtime.get());
@@ -371,6 +636,13 @@ extern "C" int32_t deckstation_ios_runtime_start_json(const char *json_value)
 			ChiakiAudioSink audio_sink{};
 			runtime->audio_decoder->GetSink(&audio_sink);
 			chiaki_session_set_audio_sink(&runtime->session, &audio_sink);
+			if(runtime->haptics_enabled)
+			{
+				ChiakiAudioSink haptics_sink{};
+				haptics_sink.user = runtime.get();
+				haptics_sink.frame_cb = haptics_frame;
+				chiaki_session_set_haptics_sink(&runtime->session, &haptics_sink);
+			}
 			error = chiaki_session_start(&runtime->session);
 			if(error == CHIAKI_ERR_SUCCESS)
 				runtime->started = true;
@@ -447,6 +719,13 @@ extern "C" int32_t deckstation_ios_runtime_stats(
 	if(value_count > 13) values[13] = connection->state_failed ? 1 : 0;
 	if(value_count > 14) values[14] = connection->remote_disconnected ? 1 : 0;
 	if(value_count > 15) values[15] = connection->last_big_client_version;
+	if(value_count > 16) values[16] = runtime->haptics_enabled ? 1 : 0;
+	if(value_count > 17) values[17] = runtime->controller_haptics_started.load() ? 1 : 0;
+	if(value_count > 18) values[18] = runtime->haptics_pcm_frame_count.load();
+	if(value_count > 19) values[19] = runtime->haptics_rumble_event_count.load();
+	if(value_count > 20) values[20] = runtime->haptics_pulse_count.load();
+	if(value_count > 21) values[21] = runtime->haptics_controller_play_count.load();
+	if(value_count > 22) values[22] = runtime->haptics_fallback_count.load();
 	chiaki_mutex_unlock(&connection->state_mutex);
 	return CHIAKI_ERR_SUCCESS;
 }

@@ -36,6 +36,8 @@ static ChiakiHeadlessCallbacks g_runtime_callbacks = {0};
 static bool g_runtime_callbacks_set = false;
 static ChiakiHeadlessRuntimeAudioSinkConfig g_runtime_audio_sink_config = {0};
 static bool g_runtime_audio_sink_config_set = false;
+static ChiakiHeadlessRuntimeHapticsSinkConfig g_runtime_haptics_sink_config = {0};
+static bool g_runtime_haptics_sink_config_set = false;
 static ChiakiHeadlessStreamProfileOverrides g_runtime_stream_profile_overrides = {0};
 static bool g_runtime_stream_profile_overrides_set = false;
 static ChiakiHeadlessLaunchOverrides g_runtime_launch_overrides = {0};
@@ -93,6 +95,8 @@ typedef struct headless_runtime_config_t
 	bool callbacks_set;
 	ChiakiHeadlessRuntimeAudioSinkConfig audio_sink_config;
 	bool audio_sink_config_set;
+	ChiakiHeadlessRuntimeHapticsSinkConfig haptics_sink_config;
+	bool haptics_sink_config_set;
 	ChiakiHeadlessLaunchOverrides launch_overrides;
 	bool launch_overrides_set;
 	ChiakiHeadlessStreamProfileOverrides stream_profile_overrides;
@@ -284,6 +288,8 @@ static ChiakiErrorCode headless_runtime_snapshot_config(HeadlessRuntimeConfig *o
 	out_config->callbacks_set = g_runtime_callbacks_set;
 	out_config->audio_sink_config = g_runtime_audio_sink_config;
 	out_config->audio_sink_config_set = g_runtime_audio_sink_config_set;
+	out_config->haptics_sink_config = g_runtime_haptics_sink_config;
+	out_config->haptics_sink_config_set = g_runtime_haptics_sink_config_set;
 	out_config->launch_overrides = g_runtime_launch_overrides;
 	out_config->launch_overrides_set = g_runtime_launch_overrides_set;
 	out_config->stream_profile_overrides = g_runtime_stream_profile_overrides;
@@ -491,6 +497,10 @@ struct chiaki_headless_session_t
 	uint64_t runtime_audio_sink_last_submit_monotonic_us;
 	uint64_t runtime_audio_sink_legacy_callback_frame_count;
 	uint64_t runtime_audio_sink_suppressed_legacy_callback_frame_count;
+	ChiakiHeadlessRuntimeHapticsSinkConfig runtime_haptics_sink_config;
+	bool runtime_haptics_sink_enabled;
+	bool runtime_haptics_sink_started;
+	bool runtime_haptics_sink_stop_dispatched;
 
 #if CHIAKI_LIB_ENABLE_FFMPEG_DECODER
 	ChiakiFfmpegDecoder video_decoder;
@@ -1320,6 +1330,56 @@ static void headless_on_audio_frame(int16_t *buf, size_t samples_count, void *us
 }
 #endif
 
+static void headless_runtime_haptics_sink_stop_locked(ChiakiHeadlessSession *s)
+{
+	if(!s || !s->runtime_haptics_sink_enabled || s->runtime_haptics_sink_stop_dispatched)
+		return;
+	s->runtime_haptics_sink_stop_dispatched = true;
+	s->runtime_haptics_sink_started = false;
+	if(s->runtime_haptics_sink_config.stop_cb)
+		s->runtime_haptics_sink_config.stop_cb(s->runtime_haptics_sink_config.user);
+}
+
+static bool headless_runtime_haptics_sink_start_if_needed_locked(ChiakiHeadlessSession *s)
+{
+	if(!s || !s->runtime_haptics_sink_enabled || s->runtime_haptics_sink_stop_dispatched)
+		return false;
+	if(s->runtime_haptics_sink_started)
+		return true;
+	bool started = true;
+	if(s->runtime_haptics_sink_config.start_cb)
+	{
+		started = s->runtime_haptics_sink_config.start_cb(
+			3000, 2, CHIAKI_HEADLESS_AUDIO_FORMAT_S16,
+			s->runtime_haptics_sink_config.user);
+	}
+	if(!started)
+		return false;
+	s->runtime_haptics_sink_started = true;
+	return true;
+}
+
+static void headless_on_haptics_frame(uint8_t *buf, size_t buf_size, void *user)
+{
+	ChiakiHeadlessSession *s = user;
+	if(!s || !buf || buf_size == 0)
+		return;
+	const uint32_t frame_count = (uint32_t)(buf_size / (2 * sizeof(int16_t)));
+	const uint64_t monotonic_time_us = chiaki_time_now_monotonic_us();
+	chiaki_mutex_lock(&s->cb_mutex);
+	if(!s->stopping && !s->stopped
+		&& s->runtime_haptics_sink_config.submit_pcm_cb
+		&& headless_runtime_haptics_sink_start_if_needed_locked(s))
+	{
+		/* The callback is made while the Chiaki frame buffer is still owned by
+		 * the sender. Sinks must consume or copy it synchronously. */
+		s->runtime_haptics_sink_config.submit_pcm_cb(
+			buf, buf_size, frame_count, monotonic_time_us,
+			s->runtime_haptics_sink_config.user);
+	}
+	chiaki_mutex_unlock(&s->cb_mutex);
+}
+
 static void headless_on_session_event(ChiakiEvent *event, void *user)
 {
 	ChiakiHeadlessSession *s = user;
@@ -1342,6 +1402,7 @@ static void headless_on_session_event(ChiakiEvent *event, void *user)
 			headless_emit_event(s, &out);
 			chiaki_mutex_lock(&s->cb_mutex);
 			s->stopped = true;
+			headless_runtime_haptics_sink_stop_locked(s);
 			chiaki_mutex_unlock(&s->cb_mutex);
 			return;
 		case CHIAKI_EVENT_VIDEO_FEC_FAILURE:
@@ -1350,6 +1411,16 @@ static void headless_on_session_event(ChiakiEvent *event, void *user)
 			headless_emit_event(s, &out);
 			return;
 		case CHIAKI_EVENT_RUMBLE:
+			chiaki_mutex_lock(&s->cb_mutex);
+			if(!s->stopping && !s->stopped
+				&& headless_runtime_haptics_sink_start_if_needed_locked(s)
+				&& s->runtime_haptics_sink_config.rumble_cb)
+			{
+				s->runtime_haptics_sink_config.rumble_cb(
+					event->rumble.left, event->rumble.right,
+					s->runtime_haptics_sink_config.user);
+			}
+			chiaki_mutex_unlock(&s->cb_mutex);
 			out.type = CHIAKI_HEADLESS_EVENT_WARNING;
 			snprintf(
 				message,
@@ -1362,6 +1433,17 @@ static void headless_on_session_event(ChiakiEvent *event, void *user)
 			headless_emit_event(s, &out);
 			return;
 		case CHIAKI_EVENT_TRIGGER_EFFECTS:
+			chiaki_mutex_lock(&s->cb_mutex);
+			if(!s->stopping && !s->stopped
+				&& headless_runtime_haptics_sink_start_if_needed_locked(s)
+				&& s->runtime_haptics_sink_config.trigger_effects_cb)
+			{
+				s->runtime_haptics_sink_config.trigger_effects_cb(
+					event->trigger_effects.type_left, event->trigger_effects.left,
+					event->trigger_effects.type_right, event->trigger_effects.right,
+					s->runtime_haptics_sink_config.user);
+			}
+			chiaki_mutex_unlock(&s->cb_mutex);
 			out.type = CHIAKI_HEADLESS_EVENT_WARNING;
 			snprintf(
 				message,
@@ -1378,6 +1460,13 @@ static void headless_on_session_event(ChiakiEvent *event, void *user)
 			headless_emit_event(s, &out);
 			return;
 		case CHIAKI_EVENT_HAPTIC_INTENSITY:
+			chiaki_mutex_lock(&s->cb_mutex);
+			if(!s->stopping && !s->stopped
+				&& headless_runtime_haptics_sink_start_if_needed_locked(s)
+				&& s->runtime_haptics_sink_config.haptic_intensity_cb)
+				s->runtime_haptics_sink_config.haptic_intensity_cb(
+					event->intensity, s->runtime_haptics_sink_config.user);
+			chiaki_mutex_unlock(&s->cb_mutex);
 			out.type = CHIAKI_HEADLESS_EVENT_WARNING;
 			snprintf(
 				message,
@@ -1388,6 +1477,13 @@ static void headless_on_session_event(ChiakiEvent *event, void *user)
 			headless_emit_event(s, &out);
 			return;
 		case CHIAKI_EVENT_TRIGGER_INTENSITY:
+			chiaki_mutex_lock(&s->cb_mutex);
+			if(!s->stopping && !s->stopped
+				&& headless_runtime_haptics_sink_start_if_needed_locked(s)
+				&& s->runtime_haptics_sink_config.trigger_intensity_cb)
+				s->runtime_haptics_sink_config.trigger_intensity_cb(
+					event->intensity, s->runtime_haptics_sink_config.user);
+			chiaki_mutex_unlock(&s->cb_mutex);
 			out.type = CHIAKI_HEADLESS_EVENT_WARNING;
 			snprintf(
 				message,
@@ -1434,6 +1530,12 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_create(ChiakiHeadlessSessi
 			s->runtime_audio_sink_enabled
 			&& s->runtime_audio_sink_config.suppress_legacy_audio_callback;
 	}
+	if(create_info->runtime_haptics_sink_config)
+	{
+		s->runtime_haptics_sink_config = *create_info->runtime_haptics_sink_config;
+		s->runtime_haptics_sink_enabled =
+			s->runtime_haptics_sink_config.enabled;
+	}
 	s->display_only_host_video_sink = create_info->display_only_host_video_sink;
 
 	ChiakiErrorCode err = chiaki_mutex_init(&s->cb_mutex, false);
@@ -1473,6 +1575,15 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_create(ChiakiHeadlessSessi
 	}
 
 	chiaki_session_set_event_cb(&s->session, headless_on_session_event, s);
+	if(s->runtime_haptics_sink_enabled)
+	{
+		ChiakiAudioSink haptics_sink = {
+			.user = s,
+			.header_cb = NULL,
+			.frame_cb = headless_on_haptics_frame,
+		};
+		chiaki_session_set_haptics_sink(&s->session, &haptics_sink);
+	}
 
 #if CHIAKI_LIB_ENABLE_FFMPEG_DECODER
 	chiaki_session_set_video_sample_cb(&s->session, chiaki_ffmpeg_decoder_video_sample_cb, &s->video_decoder);
@@ -1497,6 +1608,9 @@ error_video_audio:
 		chiaki_ffmpeg_decoder_fini(&s->video_decoder);
 #endif
 error_mutex:
+	chiaki_mutex_lock(&s->cb_mutex);
+	headless_runtime_haptics_sink_stop_locked(s);
+	chiaki_mutex_unlock(&s->cb_mutex);
 	chiaki_mutex_fini(&s->cb_mutex);
 	free(s);
 	return err;
@@ -1511,13 +1625,14 @@ CHIAKI_EXPORT void chiaki_headless_session_destroy(ChiakiHeadlessSession *s)
 	if(s->stats_thread_started)
 		chiaki_thread_join(&s->stats_thread, NULL);
 
-	chiaki_session_fini(&s->session);
-
-#if CHIAKI_LIB_ENABLE_OPUS
 	chiaki_mutex_lock(&s->cb_mutex);
+#if CHIAKI_LIB_ENABLE_OPUS
 	headless_runtime_audio_sink_stop_locked(s);
-	chiaki_mutex_unlock(&s->cb_mutex);
 #endif
+	headless_runtime_haptics_sink_stop_locked(s);
+	chiaki_mutex_unlock(&s->cb_mutex);
+
+	chiaki_session_fini(&s->session);
 
 #if CHIAKI_LIB_ENABLE_OPUS
 	if(s->audio_decoder_init)
@@ -1544,6 +1659,11 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_start(ChiakiHeadlessSessio
 	chiaki_mutex_lock(&s->cb_mutex);
 	s->stopped = false;
 	s->stopping = false;
+	s->runtime_haptics_sink_started = false;
+	s->runtime_haptics_sink_stop_dispatched = false;
+	if(s->runtime_haptics_sink_enabled
+		&& !headless_runtime_haptics_sink_start_if_needed_locked(s))
+		headless_runtime_haptics_sink_stop_locked(s);
 	chiaki_mutex_unlock(&s->cb_mutex);
 
 	ChiakiHeadlessEvent ev = {0};
@@ -1552,7 +1672,12 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_start(ChiakiHeadlessSessio
 
 	ChiakiErrorCode err = chiaki_session_start(&s->session);
 	if(err != CHIAKI_ERR_SUCCESS)
+	{
+		chiaki_mutex_lock(&s->cb_mutex);
+		headless_runtime_haptics_sink_stop_locked(s);
+		chiaki_mutex_unlock(&s->cb_mutex);
 		return err;
+	}
 
 	s->stats_stop = false;
 	if(!s->stats_thread_started)
@@ -1578,6 +1703,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_stop(ChiakiHeadlessSession
 #if CHIAKI_LIB_ENABLE_OPUS
 	headless_runtime_audio_sink_stop_locked(s);
 #endif
+	headless_runtime_haptics_sink_stop_locked(s);
 	chiaki_mutex_unlock(&s->cb_mutex);
 	return chiaki_session_stop(&s->session);
 }
@@ -1600,6 +1726,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_join(ChiakiHeadlessSession
 	headless_emit_event(s, &ev);
 	chiaki_mutex_lock(&s->cb_mutex);
 	s->stopped = true;
+	headless_runtime_haptics_sink_stop_locked(s);
 	chiaki_mutex_unlock(&s->cb_mutex);
 	return err;
 }
@@ -1653,7 +1780,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_set_login_pin(ChiakiHeadle
 
 CHIAKI_EXPORT uint32_t chiaki_headless_api_version(void)
 {
-	return 41;
+	return 42;
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_probe(void)
@@ -1919,6 +2046,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start(
 	runtime_config.callbacks_set = g_runtime_callbacks_set;
 	runtime_config.audio_sink_config = g_runtime_audio_sink_config;
 	runtime_config.audio_sink_config_set = g_runtime_audio_sink_config_set;
+	runtime_config.haptics_sink_config = g_runtime_haptics_sink_config;
+	runtime_config.haptics_sink_config_set = g_runtime_haptics_sink_config_set;
 	runtime_config.launch_overrides = g_runtime_launch_overrides;
 	runtime_config.launch_overrides_set = g_runtime_launch_overrides_set;
 	runtime_config.stream_profile_overrides = g_runtime_stream_profile_overrides;
@@ -1952,6 +2081,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_cloud_start(
 		.callbacks = runtime_config.callbacks_set ? &runtime_config.callbacks : NULL,
 		.runtime_audio_sink_config =
 			runtime_config.audio_sink_config_set ? &runtime_config.audio_sink_config : NULL,
+		.runtime_haptics_sink_config =
+			runtime_config.haptics_sink_config_set ? &runtime_config.haptics_sink_config : NULL,
 		.display_only_host_video_sink =
 			runtime_config.policy_overrides_set
 			&& runtime_config.policy_overrides.use_display_only_host_video_sink
@@ -2364,6 +2495,64 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_audio_sink_config(
 	*out_config = g_runtime_audio_sink_config;
 	if(!g_runtime_audio_sink_config_set)
 		chiaki_headless_runtime_audio_sink_config_init(out_config);
+	chiaki_mutex_unlock(&g_runtime_lock);
+	return CHIAKI_ERR_SUCCESS;
+}
+
+CHIAKI_EXPORT size_t chiaki_headless_runtime_haptics_sink_config_size(void)
+{
+	return sizeof(ChiakiHeadlessRuntimeHapticsSinkConfig);
+}
+
+CHIAKI_EXPORT void chiaki_headless_runtime_haptics_sink_config_init(
+	ChiakiHeadlessRuntimeHapticsSinkConfig *config)
+{
+	if(!config)
+		return;
+	memset(config, 0, sizeof(*config));
+	config->api_version = chiaki_headless_api_version();
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_haptics_sink_config(
+	const ChiakiHeadlessRuntimeHapticsSinkConfig *config)
+{
+	ChiakiErrorCode err = headless_runtime_ensure_lock();
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	chiaki_mutex_lock(&g_runtime_lock);
+	if(g_runtime_session || g_runtime_start_in_flight)
+	{
+		chiaki_mutex_unlock(&g_runtime_lock);
+		return CHIAKI_ERR_MUTEX_LOCKED;
+	}
+	if(config)
+	{
+		g_runtime_haptics_sink_config = *config;
+		g_runtime_haptics_sink_config_set = true;
+	}
+	else
+	{
+		memset(&g_runtime_haptics_sink_config, 0,
+			sizeof(g_runtime_haptics_sink_config));
+		g_runtime_haptics_sink_config.api_version = chiaki_headless_api_version();
+		g_runtime_haptics_sink_config_set = false;
+	}
+	chiaki_mutex_unlock(&g_runtime_lock);
+	return CHIAKI_ERR_SUCCESS;
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_haptics_sink_config(
+	ChiakiHeadlessRuntimeHapticsSinkConfig *out_config)
+{
+	if(!out_config)
+		return CHIAKI_ERR_INVALID_DATA;
+	ChiakiErrorCode err = headless_runtime_ensure_lock();
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	chiaki_mutex_lock(&g_runtime_lock);
+	*out_config = g_runtime_haptics_sink_config;
+	if(!g_runtime_haptics_sink_config_set)
+		chiaki_headless_runtime_haptics_sink_config_init(out_config);
 	chiaki_mutex_unlock(&g_runtime_lock);
 	return CHIAKI_ERR_SUCCESS;
 }

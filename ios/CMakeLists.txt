@@ -23,6 +23,9 @@ target_link_libraries(fash PRIVATE
 	"-framework CoreMedia"
 	"-framework CoreVideo"
 	"-framework Foundation"
+	"-framework AudioToolbox"
+	"-framework CoreHaptics"
+	"-framework GameController"
 	"-framework VideoToolbox")
 
 # These cloud entry points are loaded by Dart FFI rather than referenced by

@@ -170,6 +170,31 @@ typedef bool (*ChiakiHeadlessRuntimeAudioSinkSubmitCallback)(
 	uint64_t monotonic_time_us,
 	void *user);
 typedef void (*ChiakiHeadlessRuntimeAudioSinkStopCallback)(void *user);
+typedef bool (*ChiakiHeadlessRuntimeHapticsSinkStartCallback)(
+	uint32_t sample_rate,
+	uint32_t channels,
+	ChiakiHeadlessAudioFormat format,
+	void *user);
+typedef bool (*ChiakiHeadlessRuntimeHapticsSinkSubmitPcmCallback)(
+	const void *data,
+	size_t data_size,
+	uint32_t frame_count,
+	uint64_t monotonic_time_us,
+	void *user);
+typedef void (*ChiakiHeadlessRuntimeHapticsSinkRumbleCallback)(
+	uint8_t low_frequency,
+	uint8_t high_frequency,
+	void *user);
+typedef void (*ChiakiHeadlessRuntimeHapticsSinkTriggerEffectsCallback)(
+	uint8_t left_type,
+	const uint8_t left[10],
+	uint8_t right_type,
+	const uint8_t right[10],
+	void *user);
+typedef void (*ChiakiHeadlessRuntimeHapticsSinkIntensityCallback)(
+	uint8_t intensity,
+	void *user);
+typedef void (*ChiakiHeadlessRuntimeHapticsSinkStopCallback)(void *user);
 
 typedef struct chiaki_headless_callbacks_t
 {
@@ -193,12 +218,29 @@ typedef struct chiaki_headless_runtime_audio_sink_config_t
 	void *user;
 } ChiakiHeadlessRuntimeAudioSinkConfig;
 
+typedef struct chiaki_headless_runtime_haptics_sink_config_t
+{
+	uint32_t api_version;
+	bool enabled;
+	ChiakiHeadlessRuntimeHapticsSinkStartCallback start_cb;
+	/* data is borrowed and is only valid for the duration of this call.
+	 * Implementations must consume or copy it synchronously. */
+	ChiakiHeadlessRuntimeHapticsSinkSubmitPcmCallback submit_pcm_cb;
+	ChiakiHeadlessRuntimeHapticsSinkRumbleCallback rumble_cb;
+	ChiakiHeadlessRuntimeHapticsSinkTriggerEffectsCallback trigger_effects_cb;
+	ChiakiHeadlessRuntimeHapticsSinkIntensityCallback haptic_intensity_cb;
+	ChiakiHeadlessRuntimeHapticsSinkIntensityCallback trigger_intensity_cb;
+	ChiakiHeadlessRuntimeHapticsSinkStopCallback stop_cb;
+	void *user;
+} ChiakiHeadlessRuntimeHapticsSinkConfig;
+
 typedef struct chiaki_headless_create_info_t
 {
 	ChiakiConnectInfo connect_info;
 	const char *ffmpeg_hw_decoder_name;
 	const ChiakiHeadlessCallbacks *callbacks;
 	const ChiakiHeadlessRuntimeAudioSinkConfig *runtime_audio_sink_config;
+	const ChiakiHeadlessRuntimeHapticsSinkConfig *runtime_haptics_sink_config;
 	bool display_only_host_video_sink;
 	ChiakiLog *log;
 } ChiakiHeadlessCreateInfo;
@@ -1471,6 +1513,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_audio_sink_config(
 	const ChiakiHeadlessRuntimeAudioSinkConfig *config);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_audio_sink_config(
 	ChiakiHeadlessRuntimeAudioSinkConfig *out_config);
+CHIAKI_EXPORT size_t chiaki_headless_runtime_haptics_sink_config_size(void);
+CHIAKI_EXPORT void chiaki_headless_runtime_haptics_sink_config_init(
+	ChiakiHeadlessRuntimeHapticsSinkConfig *config);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_haptics_sink_config(
+	const ChiakiHeadlessRuntimeHapticsSinkConfig *config);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_get_haptics_sink_config(
+	ChiakiHeadlessRuntimeHapticsSinkConfig *out_config);
 CHIAKI_EXPORT size_t chiaki_headless_runtime_audio_sink_diagnostics_size(void);
 CHIAKI_EXPORT void chiaki_headless_runtime_audio_sink_diagnostics_init(
 	ChiakiHeadlessRuntimeAudioSinkDiagnostics *diagnostics);

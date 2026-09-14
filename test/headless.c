@@ -34,8 +34,33 @@ static MunitResult test_headless_probe(const MunitParameter params[], void *user
 {
 	(void)params;
 	(void)user;
-	munit_assert_uint32(chiaki_headless_api_version(), ==, 41);
+	munit_assert_uint32(chiaki_headless_api_version(), ==, 42);
 	munit_assert_int(chiaki_headless_probe(), ==, CHIAKI_ERR_SUCCESS);
+	return MUNIT_OK;
+}
+
+static MunitResult test_headless_haptics_config_lifecycle(
+	const MunitParameter params[], void *user)
+{
+	(void)params;
+	(void)user;
+	ChiakiHeadlessRuntimeHapticsSinkConfig config = {0};
+	chiaki_headless_runtime_haptics_sink_config_init(&config);
+	munit_assert_size(chiaki_headless_runtime_haptics_sink_config_size(), ==,
+		sizeof(config));
+	munit_assert_uint32(config.api_version, ==, chiaki_headless_api_version());
+	config.enabled = true;
+	munit_assert_int(chiaki_headless_runtime_set_haptics_sink_config(&config), ==,
+		CHIAKI_ERR_SUCCESS);
+	ChiakiHeadlessRuntimeHapticsSinkConfig out = {0};
+	munit_assert_int(chiaki_headless_runtime_get_haptics_sink_config(&out), ==,
+		CHIAKI_ERR_SUCCESS);
+	munit_assert_true(out.enabled);
+	munit_assert_int(chiaki_headless_runtime_set_haptics_sink_config(NULL), ==,
+		CHIAKI_ERR_SUCCESS);
+	munit_assert_int(chiaki_headless_runtime_get_haptics_sink_config(&out), ==,
+		CHIAKI_ERR_SUCCESS);
+	munit_assert_false(out.enabled);
 	return MUNIT_OK;
 }
 
@@ -3920,6 +3945,14 @@ MunitTest tests_headless[] = {
 	{
 		"/external_video_frame_abi",
 		test_headless_external_video_frame_abi,
+		NULL,
+		NULL,
+		MUNIT_TEST_OPTION_NONE,
+		NULL,
+	},
+	{
+		"/haptics_config_lifecycle",
+		test_headless_haptics_config_lifecycle,
 		NULL,
 		NULL,
 		MUNIT_TEST_OPTION_NONE,
