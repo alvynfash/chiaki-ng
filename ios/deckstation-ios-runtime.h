@@ -25,6 +25,7 @@ void deckstation_ios_runtime_set_callbacks(void *user,
 	DeckStationIOSStatsCallback stats_callback);
 int32_t deckstation_ios_runtime_start_json(const char *json);
 int32_t deckstation_ios_runtime_stop(void);
+int32_t deckstation_ios_runtime_set_haptics_accepting(uint8_t accepting);
 int32_t deckstation_ios_runtime_stats(uint64_t *values, int32_t value_count);
 int32_t deckstation_ios_runtime_send_controller_state(
 	int32_t buttons, int32_t l2_state, int32_t r2_state,

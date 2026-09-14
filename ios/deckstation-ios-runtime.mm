@@ -207,6 +207,7 @@ struct RuntimeSession
 	std::atomic<uint64_t> video_decode_recovered_frames{0};
 	std::atomic<uint64_t> video_decode_gap_events{0};
 	bool haptics_enabled = false;
+	std::atomic<bool> haptics_accepting{false};
 	DeckStationIOSControllerHaptics *controller_haptics = nil;
 	std::atomic<bool> controller_haptics_started{false};
 	uint8_t haptic_intensity = 255;
@@ -231,7 +232,8 @@ std::string controller_variant = "ds4:0";
 
 void haptics_pulse(RuntimeSession *runtime, uint8_t low, uint8_t high)
 {
-	if(!runtime || !runtime->haptics_enabled)
+	if(!runtime || !runtime->haptics_enabled
+		|| !runtime->haptics_accepting.load())
 		return;
 	const uint64_t now = chiaki_time_now_monotonic_us();
 	if(runtime->last_haptic_pulse_us != 0
@@ -339,7 +341,7 @@ void emit_stream_stats(RuntimeSession *runtime)
 		static_cast<double>(runtime->video_decode_lost_frames.load()),
 		static_cast<double>(runtime->video_decode_recovered_frames.load()),
 		static_cast<double>(runtime->video_decode_gap_events.load()),
-		runtime->haptics_enabled ? 1.0 : 0.0,
+		runtime->haptics_accepting.load() ? 1.0 : 0.0,
 		runtime->controller_haptics_started.load() ? 1.0 : 0.0,
 		static_cast<double>(runtime->haptics_pcm_frame_count.load()),
 		static_cast<double>(runtime->haptics_rumble_event_count.load()),
@@ -388,6 +390,7 @@ void session_event(ChiakiEvent *event, void *user)
 			}
 			break;
 		case CHIAKI_EVENT_QUIT:
+			runtime->haptics_accepting = false;
 			runtime->haptics_enabled = false;
 			if(runtime->controller_haptics)
 				[runtime->controller_haptics stop];
@@ -501,6 +504,7 @@ void free_session(RuntimeSession *runtime)
 	if(!runtime)
 		return;
 	runtime->haptics_enabled = false;
+	runtime->haptics_accepting = false;
 	runtime->local_stop_requested = true;
 	if(runtime->controller_haptics)
 		[runtime->controller_haptics stop];
@@ -619,13 +623,17 @@ extern "C" int32_t deckstation_ios_runtime_start_json(const char *json_value)
 			runtime->session_initialized = true;
 		runtime->haptics_enabled = bool_value(json, @"enableHaptics", false)
 			&& bool_value(json, @"ps5", true);
+		runtime->haptics_accepting = runtime->haptics_enabled
+			&& bool_value(json, @"hapticsOutputEnabled", false);
 		if(runtime->haptics_enabled)
 		{
 			runtime->controller_haptics =
 				[[DeckStationIOSControllerHaptics alloc] init];
-			runtime->controller_haptics_started =
-				[runtime->controller_haptics start];
-			NSLog(@"[DeckStationHaptics] enabled=1 controllerEngine=%d controllers=%lu",
+			if(runtime->haptics_accepting.load())
+				runtime->controller_haptics_started =
+					[runtime->controller_haptics start];
+			NSLog(@"[DeckStationHaptics] provisioned=1 accepting=%d controllerEngine=%d controllers=%lu",
+				runtime->haptics_accepting.load() ? 1 : 0,
 				runtime->controller_haptics_started.load() ? 1 : 0,
 				(unsigned long)GCController.controllers.count);
 		}
@@ -679,6 +687,26 @@ extern "C" int32_t deckstation_ios_runtime_stop(void)
 	return CHIAKI_ERR_SUCCESS;
 }
 
+extern "C" int32_t deckstation_ios_runtime_set_haptics_accepting(
+	uint8_t accepting)
+{
+	std::lock_guard<std::mutex> lock(session_mutex);
+	RuntimeSession *runtime = active_session;
+	if(!runtime || !runtime->haptics_enabled || !runtime->controller_haptics)
+		return CHIAKI_ERR_UNINITIALIZED;
+	const bool enabled = accepting != 0;
+	runtime->haptics_accepting = enabled;
+	if(enabled)
+		runtime->controller_haptics_started =
+			[runtime->controller_haptics start];
+	else
+	{
+		[runtime->controller_haptics stop];
+		runtime->controller_haptics_started = false;
+	}
+	return CHIAKI_ERR_SUCCESS;
+}
+
 extern "C" int32_t deckstation_ios_runtime_stats(
 	uint64_t *values, int32_t value_count)
 {
@@ -719,7 +747,7 @@ extern "C" int32_t deckstation_ios_runtime_stats(
 	if(value_count > 13) values[13] = connection->state_failed ? 1 : 0;
 	if(value_count > 14) values[14] = connection->remote_disconnected ? 1 : 0;
 	if(value_count > 15) values[15] = connection->last_big_client_version;
-	if(value_count > 16) values[16] = runtime->haptics_enabled ? 1 : 0;
+	if(value_count > 16) values[16] = runtime->haptics_accepting.load() ? 1 : 0;
 	if(value_count > 17) values[17] = runtime->controller_haptics_started.load() ? 1 : 0;
 	if(value_count > 18) values[18] = runtime->haptics_pcm_frame_count.load();
 	if(value_count > 19) values[19] = runtime->haptics_rumble_event_count.load();
