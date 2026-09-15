@@ -242,8 +242,13 @@ typedef struct cc_imagic_result_t
 	bool any_succeeded;
 } CCImagicResult;
 
-/** imagic 6-list fetch with locale fallback chain. Returns true if any list loaded. */
-bool cc_fetch_imagic(ChiakiLog *log, const char *stored_locale, CCImagicResult *out);
+/**
+ * Imagic fetch with locale fallback chain. When all_ps5_only is true, fetches
+ * only the streamability universe required by the Owned scope; otherwise it
+ * fetches all six catalog lists. Returns true if any requested list loaded.
+ */
+bool cc_fetch_imagic(ChiakiLog *log, const char *stored_locale,
+	bool all_ps5_only, CCImagicResult *out);
 void cc_imagic_result_fini(CCImagicResult *r);
 
 typedef enum cc_owned_result_t

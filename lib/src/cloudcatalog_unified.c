@@ -211,13 +211,16 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 	bool force = config->force_refresh;
 	const char *requested_scope = config->scope && *config->scope ? config->scope : "all";
 	const char *scope = requested_scope;
-	const bool include_apollo = strcmp(scope, "psplus") != 0;
-	const bool include_imagic = strcmp(scope, "psnow") != 0;
-	// Ownership needs both catalog sources for the same cross-reference contract.
-	// Treat an unknown/owned scope as the complete unified request rather than
-	// silently returning a partial library.
-	if(strcmp(scope, "psplus") != 0 && strcmp(scope, "psnow") != 0)
+	if(strcmp(scope, "owned") != 0 && strcmp(scope, "psplus") != 0
+		&& strcmp(scope, "psnow") != 0 && strcmp(scope, "all") != 0)
 		scope = "all";
+	const bool owned_scope = strcmp(scope, "owned") == 0;
+	// The Owned UI is PS5-only. It needs Imagic metadata plus the account's
+	// entitlements, but not the expensive sequential APOLLOROOT/PS Now category
+	// walk used by the complete catalog.
+	const bool include_apollo = strcmp(scope, "psplus") != 0 && !owned_scope;
+	const bool include_imagic = strcmp(scope, "psnow") != 0;
+	const bool include_owned = strcmp(scope, "all") == 0 || owned_scope;
 	char unified_cache_key[64];
 	snprintf(unified_cache_key, sizeof(unified_cache_key), "unified_catalog_%s_v1", scope);
 
@@ -228,7 +231,15 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 	// build (different contract) is never served as a stale hit.
 	if(!force)
 	{
-		struct json_object *cached = cc_cache_read(log, cache_dir, unified_cache_key, CC_CACHE_TTL_MS);
+		const char *cache_hit_key = unified_cache_key;
+		struct json_object *cached = cc_cache_read(log, cache_dir, cache_hit_key, CC_CACHE_TTL_MS);
+		// Older builds stored Owned as a projection of the complete `all` cache.
+		// Reuse that snapshot so upgrading does not force another network request.
+		if(!cached && owned_scope)
+		{
+			cache_hit_key = "unified_catalog_all_v1";
+			cached = cc_cache_read(log, cache_dir, cache_hit_key, CC_CACHE_TTL_MS);
+		}
 		if(cached)
 		{
 			struct json_object *sv = NULL;
@@ -243,7 +254,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 					compact_catalog_contract(cached);
 					json_object_object_del(cached, "schemaVersion");
 					json_object_object_add(cached, "schemaVersion", next_version);
-					cc_cache_write(log, cache_dir, unified_cache_key, cached);
+					cc_cache_write(log, cache_dir, cache_hit_key, cached);
 					CHIAKI_LOGI(log, "[CACHE] compacted unified schemaVersion 8 -> %d",
 						CHIAKI_CLOUDCATALOG_SCHEMA_VERSION);
 				}
@@ -254,7 +265,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 			}
 			CHIAKI_LOGI(log, "[CACHE] unified schemaVersion %d != %d; refetching",
 				ver, CHIAKI_CLOUDCATALOG_SCHEMA_VERSION);
-			cc_cache_remove(cache_dir, unified_cache_key);
+			cc_cache_remove(cache_dir, cache_hit_key);
 			json_object_put(cached);
 		}
 	}
@@ -407,14 +418,16 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 	else if(include_imagic)
 	{
 		CCImagicResult ir;
-		if(cc_fetch_imagic(log, effective_locale, &ir))
+		if(cc_fetch_imagic(log, effective_locale, owned_scope, &ir))
 		{
 			browse = ir.browse; ir.browse = NULL;
 			supplement = ir.supplement; ir.supplement = NULL;
 			aliases = ir.aliases; ir.aliases = NULL;
 			snprintf(settled, sizeof(settled), "%s", ir.settled_locale);
 			browse_complete = ir.all_ps5_list_succeeded;
-			if(ir.all_ps5_list_succeeded)
+			// The shared v6 cache must always contain all six lists. Owned-only
+			// refreshes instead persist their final unified result below.
+			if(ir.all_ps5_list_succeeded && !owned_scope)
 				write_v6_cache(log, cache_dir, settled, browse, supplement, aliases);
 			cc_imagic_result_fini(&ir);
 		}
@@ -449,9 +462,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 	}
 
 	// 4. owned entitlements (skip on missing/expired session).
-	bool owned_complete = !include_apollo || !include_imagic;
+	bool owned_complete = !include_owned;
 	struct json_object *owned = NULL, *components = NULL;
-	if(include_apollo && include_imagic && *npsso && !auth_error)
+	if(include_owned && *npsso && !auth_error)
 	{
 		struct json_object *lib = force ? NULL : cc_cache_read(log, cache_dir, "ps5_cloud_library", CC_CACHE_TTL_MS);
 		if(lib)
@@ -463,12 +476,16 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 			if(fb2) json_object_put(fb2);
 			components = c ? cc_json_clone(c) : json_object_new_object();
 			json_object_put(lib);
+			owned_complete = true;
 		}
 		else
 		{
 			CCOwnedResult orr = cc_fetch_owned(log, npsso, &owned, &components);
 			if(orr == CC_OWNED_OK)
+			{
 				write_library_cache(log, cache_dir, owned, components);
+				owned_complete = true;
+			}
 			else if(orr == CC_OWNED_AUTH_ERROR)
 			{
 				auth_error = true;
@@ -509,7 +526,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 	in.warning = warning;
 	struct json_object *env = cc_assemble_unified_catalog(log, &in);
 
-	// 7. cache write guard (non-empty + not auth error + all three sources complete).
+	// 7. Cache only a complete authenticated result. Each successful source path,
+	// including an intermediate cache hit, must explicitly mark itself complete.
 	struct json_object *games = cc_json_arr(env, "games");
 	int total = games ? (int)json_object_array_length(games) : 0;
 	compact_catalog_contract(env);
@@ -547,7 +565,8 @@ CHIAKI_EXPORT void chiaki_cloudcatalog_invalidate_cache(const char *cache_dir)
 	// Current keys + legacy keys, so invalidation also purges caches written by
 	// older builds (e.g. the pre-contract unified_catalog_v2).
 	static const char *const keys[] = {
-		"unified_catalog_all_v1", "unified_catalog_psplus_v1", "unified_catalog_psnow_v1",
+		"unified_catalog_all_v1", "unified_catalog_owned_v1",
+		"unified_catalog_psplus_v1", "unified_catalog_psnow_v1",
 		"unified_catalog_v3", "ps5_cloud_catalog_v6", "ps5_cloud_library",
 		"psnow_catalog",
 		"unified_catalog_v2", "unified_catalog_v1",

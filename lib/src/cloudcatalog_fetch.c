@@ -17,6 +17,7 @@
 #include <arpa/inet.h>
 #endif
 #include <chiaki/remote/holepunch.h>
+#include <chiaki/thread.h>
 
 #include <curl/curl.h>
 
@@ -414,6 +415,35 @@ static bool psnow_fetch_category(ChiakiLog *log, const char *cat_url, struct jso
 	return true;
 }
 
+// The nine alphabetical category requests are independent. Keep their curl and
+// JSON state thread-local, then merge on the caller thread in category order so
+// first-wins dedup remains deterministic. The root exposes nine alphabetical
+// categories, so dispatch the complete one-off fan-out together.
+#define PSNOW_CATEGORY_CONCURRENCY 9
+
+typedef struct psnow_category_job_t
+{
+	ChiakiLog *log;
+	const char *url;
+	struct json_object *games;
+	bool success;
+} PSNowCategoryJob;
+
+static void *psnow_category_job_run(void *arg)
+{
+	PSNowCategoryJob *job = (PSNowCategoryJob *)arg;
+	job->games = json_object_new_array();
+	if(!job->games)
+		return NULL;
+	job->success = psnow_fetch_category(job->log, job->url, job->games);
+	if(!job->success)
+	{
+		CC_MS_SLEEP(500);
+		job->success = psnow_fetch_category(job->log, job->url, job->games);
+	}
+	return NULL;
+}
+
 CCNativeResult cc_fetch_psnow_native(ChiakiLog *log, const char *npsso, struct json_object **out_games,
 	char *out_country, size_t cc_sz, char *out_language, size_t lang_sz,
 	char *out_store_country, size_t store_cc_sz, char *out_store_lang, size_t store_lang_sz,
@@ -466,18 +496,48 @@ CCNativeResult cc_fetch_psnow_native(ChiakiLog *log, const char *npsso, struct j
 	struct json_object *all = json_object_new_array();
 	bool complete = true;
 	if(out_complete) *out_complete = true;
-	for(int i = 0; i < cat_count; i++)
+	for(int batch_start = 0; batch_start < cat_count;
+		batch_start += PSNOW_CATEGORY_CONCURRENCY)
 	{
-		if(i) CC_MS_SLEEP(100);
-		if(!psnow_fetch_category(log, cat_urls[i], all))
+		PSNowCategoryJob jobs[PSNOW_CATEGORY_CONCURRENCY] = { 0 };
+		ChiakiThread threads[PSNOW_CATEGORY_CONCURRENCY];
+		bool threaded[PSNOW_CATEGORY_CONCURRENCY] = { false };
+		int batch_count = cat_count - batch_start;
+		if(batch_count > PSNOW_CATEGORY_CONCURRENCY)
+			batch_count = PSNOW_CATEGORY_CONCURRENCY;
+
+		for(int slot = 0; slot < batch_count; slot++)
 		{
-			CC_MS_SLEEP(500);
-			if(!psnow_fetch_category(log, cat_urls[i], all))
+			jobs[slot].log = log;
+			jobs[slot].url = cat_urls[batch_start + slot];
+			if(chiaki_thread_create(&threads[slot], psnow_category_job_run,
+					&jobs[slot]) == CHIAKI_ERR_SUCCESS)
+				threaded[slot] = true;
+			else
+				psnow_category_job_run(&jobs[slot]);
+		}
+
+		for(int slot = 0; slot < batch_count; slot++)
+		{
+			if(threaded[slot])
+				chiaki_thread_join(&threads[slot], NULL);
+			PSNowCategoryJob *job = &jobs[slot];
+			if(!job->success)
 			{
 				complete = false;
 				if(out_complete) *out_complete = false;
-				CHIAKI_LOGW(log, "[PSNOW] category %d failed; catalog incomplete", i);
+				CHIAKI_LOGW(log, "[PSNOW] category %d failed; catalog incomplete",
+					batch_start + slot);
 			}
+			else
+			{
+				size_t n = json_object_array_length(job->games);
+				for(size_t i = 0; i < n; i++)
+					json_object_array_add(all,
+						json_object_get(json_object_array_get_idx(job->games, i)));
+			}
+			if(job->games)
+				json_object_put(job->games);
 		}
 	}
 
@@ -703,7 +763,8 @@ void cc_imagic_result_fini(CCImagicResult *r)
 	memset(r, 0, sizeof(*r));
 }
 
-bool cc_fetch_imagic(ChiakiLog *log, const char *stored_locale, CCImagicResult *out)
+bool cc_fetch_imagic(ChiakiLog *log, const char *stored_locale,
+	bool all_ps5_only, CCImagicResult *out)
 {
 	memset(out, 0, sizeof(*out));
 	char *chain[3];
@@ -723,7 +784,8 @@ bool cc_fetch_imagic(ChiakiLog *log, const char *stored_locale, CCImagicResult *
 		int total_seen = 0, succeeded = 0;
 		bool all_ps5_ok = false;
 
-		for(int i = 0; i < IMAGIC_LIST_COUNT; i++)
+		const int first_list = all_ps5_only ? IMAGIC_LIST_COUNT - 1 : 0;
+		for(int i = first_list; i < IMAGIC_LIST_COUNT; i++)
 		{
 			char url[256];
 			snprintf(url, sizeof(url),
@@ -806,7 +868,8 @@ bool cc_fetch_imagic(ChiakiLog *log, const char *stored_locale, CCImagicResult *
 		snprintf(out->settled_locale, sizeof(out->settled_locale), "%s", chain[tier]);
 		out->all_ps5_list_succeeded = all_ps5_ok;
 		out->any_succeeded = true;
-		CHIAKI_LOGI(log, "[PSCLOUD] imagic settled on %s: %d browse, %d supplement (scanned %d)",
+		CHIAKI_LOGI(log, "[PSCLOUD] imagic%s settled on %s: %d browse, %d supplement (scanned %d)",
+			all_ps5_only ? " all-ps5-only" : "",
 			out->settled_locale, (int)json_object_array_length(browse),
 			(int)json_object_array_length(supp), total_seen);
 		break;
@@ -1006,4 +1069,3 @@ CCOwnedResult cc_fetch_owned(ChiakiLog *log, const char *npsso,
 		(int)an, (int)json_object_array_length(*out_games));
 	return CC_OWNED_OK;
 }
-
