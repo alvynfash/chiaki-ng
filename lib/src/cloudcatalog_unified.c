@@ -216,8 +216,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 		scope = "all";
 	const bool owned_scope = strcmp(scope, "owned") == 0;
 	// The Owned UI is PS5-only. It needs Imagic metadata plus the account's
-	// entitlements, but not the expensive sequential APOLLOROOT/PS Now category
-	// walk used by the complete catalog.
+	// entitlements, but not the APOLLOROOT/PS Now category walk used by the
+	// complete catalog.
 	const bool include_apollo = strcmp(scope, "psplus") != 0 && !owned_scope;
 	const bool include_imagic = strcmp(scope, "psnow") != 0;
 	const bool include_owned = strcmp(scope, "all") == 0 || owned_scope;
@@ -532,7 +532,22 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 	int total = games ? (int)json_object_array_length(games) : 0;
 	compact_catalog_contract(env);
 	if(total > 0 && !auth_error && apollo_complete && browse_complete && owned_complete)
+	{
 		cc_cache_write(log, cache_dir, unified_cache_key, env);
+		// A complete All refresh already contains current entitlement and PS5
+		// streamability data. Persist its Owned projection too so startup
+		// revalidation never needs to repeat the ownership requests.
+		if(strcmp(scope, "all") == 0)
+		{
+			struct json_object *owned_env = cc_json_clone(env);
+			if(owned_env)
+			{
+				project_result_scope(owned_env, "owned");
+				cc_cache_write(log, cache_dir, "unified_catalog_owned_v1", owned_env);
+				json_object_put(owned_env);
+			}
+		}
+	}
 
 	project_result_scope(env, requested_scope);
 	ChiakiErrorCode e = finish_ok(out, env);
