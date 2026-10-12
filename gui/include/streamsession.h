@@ -43,6 +43,7 @@
 #include <QWaitCondition>
 #include <QAtomicInteger>
 #include <QSet>
+#include <QHash>
 #if CHIAKI_GUI_ENABLE_SPEEX
 #include <QQueue>
 #include <speex/speex_echo.h>
@@ -212,6 +213,7 @@ class StreamSession : public QObject
 	QHash<int, Controller *> controllers;
 	QHash<int, uint8_t> controller_pad_indices;
 	QSet<int> cloud_active_pads;
+	QSet<int> cloud_controller_announced;
 #if CHIAKI_GUI_ENABLE_SETSU
 		Setsu *setsu;
 		QMap<QPair<QString, SetsuTrackingId>, uint8_t> setsu_ids;
@@ -332,6 +334,7 @@ class StreamSession : public QObject
 #endif
 		void AdjustAdaptiveTriggerPacket(uint8_t *buf, uint8_t type);
 		void WaitHaptics();
+		void EmitCloudControllerEvent(const QString &type, uint8_t pad, const QString &name);
 
 	private slots:
 		void InitAudio(unsigned int channels, unsigned int rate);

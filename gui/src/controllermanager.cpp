@@ -156,6 +156,11 @@ ControllerManager::ControllerManager(QObject *parent)
 	auto timer = new QTimer(this);
 	connect(timer, &QTimer::timeout, this, &ControllerManager::HandleEvents);
 	timer->start(UPDATE_INTERVAL_MS);
+	// Some macOS controller backends miss a hotplug event. Periodically reconcile
+	// SDL's device list so detached instance IDs cannot keep their player pads.
+	auto device_timer = new QTimer(this);
+	connect(device_timer, &QTimer::timeout, this, &ControllerManager::UpdateAvailableControllers);
+	device_timer->start(250);
 	auto move_timer = new QTimer(this);
 	connect(move_timer, &QTimer::timeout, this, &ControllerManager::CheckMoved);
 	move_timer->start(MOVE_CHECK_MS);
@@ -208,7 +213,7 @@ void ControllerManager::UpdateAvailableControllers()
 			continue;
 
 		// We'll try to identify pads with Motion Control
-		SDL_JoystickGUID guid = SDL_JoystickGetGUID(SDL_JoystickOpen(i));
+		SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(i);
 		char guid_str[256];
 		SDL_JoystickGetGUIDString(guid, guid_str, sizeof(guid_str));
 
@@ -250,6 +255,8 @@ void ControllerManager::HandleEvents()
 		{
 			case SDL_JOYDEVICEADDED:
 			case SDL_JOYDEVICEREMOVED:
+			case SDL_CONTROLLERDEVICEADDED:
+			case SDL_CONTROLLERDEVICEREMOVED:
 				UpdateAvailableControllers();
 				break;
 			case SDL_JOYAXISMOTION:
@@ -741,6 +748,29 @@ QString Controller::GetGUIDString()
 #else
 	return QString();
 #endif
+}
+
+QString Controller::GetStableIdentity()
+{
+#ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+	if(!controller)
+		return QString();
+	SDL_Joystick *js = SDL_GameControllerGetJoystick(controller);
+	if(!js)
+		return QString();
+	const QString guid = GetGUIDString();
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+	const char *serial = SDL_JoystickGetSerial(js);
+	if(serial && *serial)
+		return QStringLiteral("serial:%1:%2").arg(guid, QString::fromUtf8(serial));
+#endif
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+	const char *path = SDL_JoystickPath(js);
+	if(path && *path)
+		return QStringLiteral("path:%1:%2").arg(guid, QString::fromUtf8(path));
+#endif
+#endif
+	return QString();
 }
 
 QString Controller::GetName()

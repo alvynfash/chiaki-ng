@@ -12,6 +12,10 @@
 #include "../../lib/src/utils.h"
 
 #include <QKeyEvent>
+#include <QDateTime>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMutexLocker>
 #include <QtMath>
 #include <atomic>
@@ -1161,10 +1165,39 @@ void StreamSession::HandleDpadTouchEvent(ChiakiControllerState *state, bool plac
 void StreamSession::UpdateGamepads()
 {
 #if CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
+	auto configure_controller = [this](int controller_id, Controller *controller, uint8_t pad) {
+		connect(controller, &Controller::StateChanged, this, &StreamSession::SendFeedbackState);
+		connect(controller, &Controller::MicButtonPush, this, &StreamSession::ToggleMute);
+		controllers[controller_id] = controller;
+		if(controller->IsHandheld())
+		{
+#if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
+			// let sdeck handle haptics bc sdeck works even if Steam is running whereas checking via SDL only works if Steam is not running
+			if(!sdeck)
+				haptics_handheld++;
+#else
+			haptics_handheld++;
+#endif
+		}
+		if (!controller->IsHandheld() && !controller->IsSteamVirtualUnmasked())
+			haptics_handheld--;
+		QTimer::singleShot(1000, this, [this, controller, pad] {
+			controller->ChangePlayerIndex(pad);
+			controller->ChangeLEDColor(led_color[pad]);
+		});
+		if (controller->IsDualSense() || controller->IsDualSenseEdge())
+		{
+			controller->SetDualsenseMic(muted);
+			if(haptics_output <= 0)
+				QTimer::singleShot(1000, this, &StreamSession::WaitHaptics);
+		}
+	};
+
+	const QSet<int> available_controller_ids = ControllerManager::GetInstance()->GetAvailableControllers();
 	for(auto controller_id : controllers.keys())
 	{
 		auto controller = controllers[controller_id];
-		if(!controller->IsConnected())
+		if(!available_controller_ids.contains(controller_id) || !controller->IsConnected())
 		{
 			CHIAKI_LOGI(log.GetChiakiLog(), "Controller %d disconnected", controller->GetDeviceID());
 			uint8_t pad = controller_pad_indices.take(controller_id);
@@ -1173,13 +1206,19 @@ void StreamSession::UpdateGamepads()
 				ChiakiControllerState idle_state;
 				chiaki_controller_state_set_idle(&idle_state);
 				chiaki_session_set_controller_state_for_pad(&session, pad, &idle_state);
-				if(session.connect_info.cloud_direct && pad > 0 && cloud_active_pads.remove(pad))
+				if(session.connect_info.cloud_direct && pad > 0 && cloud_active_pads.contains(pad))
 				{
 					ChiakiErrorCode err = chiaki_session_set_player_pad_active(&session, pad, false);
-					if(err != CHIAKI_ERR_SUCCESS)
-						CHIAKI_LOGW(GetChiakiLog(), "Failed to disconnect cloud controller pad %u: %s", pad, chiaki_error_string(err));
+					if(err == CHIAKI_ERR_SUCCESS)
+						cloud_active_pads.remove(pad);
+					else
+						CHIAKI_LOGW(GetChiakiLog(), "Failed to disconnect cloud controller pad %u; retaining it for retry: %s", pad, chiaki_error_string(err));
 				}
+				if(session.connect_info.cloud_direct && cloud_controller_announced.remove(controller_id))
+					EmitCloudControllerEvent("controller_disconnected", pad, controller->GetName());
 			}
+			else
+				cloud_controller_announced.remove(controller_id);
 			controllers.remove(controller_id);
 			if(pad < 4)
 			{
@@ -1192,7 +1231,45 @@ void StreamSession::UpdateGamepads()
 		}
 	}
 
-	auto available_controllers = ControllerManager::GetInstance()->GetAvailableControllers().values();
+	// Retry Cloud leaves for pads whose local device has already disappeared.
+	// Keep such pads reserved until the leave sequence has been accepted.
+	if(session.connect_info.cloud_direct)
+	{
+		for(int pad : cloud_active_pads.values())
+		{
+			bool assigned = false;
+			for(auto it = controller_pad_indices.constBegin(); it != controller_pad_indices.constEnd(); ++it)
+				if(it.value() == pad)
+				{
+					assigned = true;
+					break;
+				}
+			if(assigned)
+				continue;
+			ChiakiErrorCode err = chiaki_session_set_player_pad_active(&session, (uint8_t)pad, false);
+			if(err == CHIAKI_ERR_SUCCESS)
+				cloud_active_pads.remove(pad);
+			else
+				CHIAKI_LOGW(GetChiakiLog(), "Retry to disconnect cloud controller pad %d failed: %s", pad, chiaki_error_string(err));
+		}
+	}
+	// A controller that arrived while every pad was occupied is retried as soon
+	// as the first available slot is released.
+	auto tracked_controller_ids = controllers.keys();
+	std::sort(tracked_controller_ids.begin(), tracked_controller_ids.end());
+	for(auto controller_id : tracked_controller_ids)
+	{
+		if(controller_pad_indices.value(controller_id, 0xff) < 4)
+			continue;
+		auto controller = controllers.value(controller_id, nullptr);
+		if(!controller)
+			continue;
+		uint8_t pad = AllocateControllerPad(controller_id);
+		if(pad < 4)
+			configure_controller(controller_id, controller, pad);
+	}
+
+	auto available_controllers = available_controller_ids.values();
 	std::sort(available_controllers.begin(), available_controllers.end());
 	for(auto controller_id : available_controllers)
 	{
@@ -1204,8 +1281,36 @@ void StreamSession::UpdateGamepads()
 				CHIAKI_LOGE(log.GetChiakiLog(), "Failed to open controller %d", controller_id);
 				continue;
 			}
+			const QString stable_identity = controller->GetStableIdentity();
+			uint8_t replacement_pad = 0xff;
+			bool replacement_was_announced = false;
+			// A few backends expose the same physical pad under a new SDL instance
+			// while leaving the old handle apparently attached. Replace the old
+			// instance in place so one device cannot drive two Cloud player slots.
+			if(!stable_identity.isEmpty())
+			{
+				for(auto previous_id : controllers.keys())
+				{
+					if(previous_id == controller_id)
+						continue;
+					auto previous = controllers.value(previous_id);
+					if(previous->GetStableIdentity() != stable_identity)
+						continue;
+					CHIAKI_LOGW(GetChiakiLog(), "Replacing stale controller instance %d with %d for the same physical pad",
+							previous_id, controller_id);
+					replacement_pad = controller_pad_indices.take(previous_id);
+					replacement_was_announced = cloud_controller_announced.remove(previous_id);
+					controllers.remove(previous_id);
+					previous->Unref();
+					break;
+				}
+			}
 			CHIAKI_LOGI(log.GetChiakiLog(), "Controller %d opened: \"%s\"", controller_id, controller->GetName().toLocal8Bit().constData());
-			uint8_t pad = AllocateControllerPad(controller_id);
+			uint8_t pad = replacement_pad < 4 ? replacement_pad : AllocateControllerPad(controller_id);
+			if(replacement_pad < 4)
+				controller_pad_indices.insert(controller_id, replacement_pad);
+			if(replacement_was_announced)
+				cloud_controller_announced.insert(controller_id);
 			if(pad >= 4)
 			{
 				CHIAKI_LOGW(log.GetChiakiLog(), session.connect_info.cloud_direct
@@ -1215,37 +1320,7 @@ void StreamSession::UpdateGamepads()
 				controllers[controller_id] = controller;
 				continue;
 			}
-			connect(controller, &Controller::StateChanged, this, &StreamSession::SendFeedbackState);
-			connect(controller, &Controller::MicButtonPush, this, &StreamSession::ToggleMute);
-			controllers[controller_id] = controller;
-			if(controller->IsHandheld())
-			{
-#if CHIAKI_GUI_ENABLE_STEAMDECK_NATIVE
-				// let sdeck handle haptics bc sdeck works even if Steam is running whereas checking via SDL only works if Steam is not running
-				if(!sdeck)
-					haptics_handheld++;
-#else
-				haptics_handheld++;
-#endif
-			}
-			if (!controller->IsHandheld() && !controller->IsSteamVirtualUnmasked())
-			{
-				haptics_handheld--;
-			}
-			QTimer::singleShot(1000, this, [this, controller, pad] {
-				controller->ChangePlayerIndex(pad);
-				controller->ChangeLEDColor(led_color[pad]);
-			});
-			if (controller->IsDualSense() || controller->IsDualSenseEdge())
-			{
-				uint8_t trigger_intensity = (ps5_trigger_intensity < 0) ? 0xF0 : ps5_trigger_intensity;
-				uint8_t rumble_intensity = (ps5_rumble_intensity < 0) ? 0x0F : ps5_rumble_intensity;
-				controller->SetDualsenseMic(muted);
-				if(this->haptics_output > 0)
-					continue;
-				// Connect haptics audio device with a delay to give the sound system time to set up
-				QTimer::singleShot(1000, this, &StreamSession::WaitHaptics);
-			}
+			configure_controller(controller_id, controller, pad);
 		}
 	}
 	if(session.connect_info.cloud_direct && connected)
@@ -1253,13 +1328,30 @@ void StreamSession::UpdateGamepads()
 		for(auto it = controller_pad_indices.constBegin(); it != controller_pad_indices.constEnd(); ++it)
 		{
 			int pad = it.value();
-			if(pad == 0 || pad >= 4 || cloud_active_pads.contains(pad))
+			if(pad >= 4)
 				continue;
+			auto controller = controllers.value(it.key(), nullptr);
+			if(!controller)
+				continue;
+			if(pad == 0 || cloud_active_pads.contains(pad))
+			{
+				if(!cloud_controller_announced.contains(it.key()))
+				{
+					cloud_controller_announced.insert(it.key());
+					EmitCloudControllerEvent("controller_joined", (uint8_t)pad, controller->GetName());
+				}
+				continue;
+			}
 			ChiakiErrorCode err = chiaki_session_set_player_pad_active(&session, (uint8_t)pad, true);
 			if(err == CHIAKI_ERR_SUCCESS)
 			{
 				cloud_active_pads.insert(pad);
 				CHIAKI_LOGI(GetChiakiLog(), "Connected cloud co-op controller to pad %d", pad);
+				if(!cloud_controller_announced.contains(it.key()))
+				{
+					cloud_controller_announced.insert(it.key());
+					EmitCloudControllerEvent("controller_joined", (uint8_t)pad, controller->GetName());
+				}
 			}
 			else
 				CHIAKI_LOGW(GetChiakiLog(), "Failed to connect cloud co-op controller to pad %d: %s", pad, chiaki_error_string(err));
@@ -1282,6 +1374,9 @@ uint8_t StreamSession::AllocateControllerPad(int device_id)
 	for(auto it = controller_pad_indices.constBegin(); it != controller_pad_indices.constEnd(); ++it)
 		if(it.value() < 4)
 			used[it.value()] = true;
+	for(int active_pad : cloud_active_pads)
+		if(active_pad >= 0 && active_pad < 4)
+			used[active_pad] = true;
 	const uint8_t pad_limit = 4; // Match the protocol’s controller IDs 0 through 3.
 	for(uint8_t pad = 0; pad < pad_limit; pad++)
 		if(!used[pad])
@@ -1291,6 +1386,33 @@ uint8_t StreamSession::AllocateControllerPad(int device_id)
 		}
 	controller_pad_indices.insert(device_id, 0xff);
 	return 0xff;
+}
+
+void StreamSession::EmitCloudControllerEvent(const QString &type, uint8_t pad, const QString &name)
+{
+	if(!session.connect_info.cloud_direct || pad >= 4)
+		return;
+
+	QJsonObject event;
+	event.insert("type", type);
+	event.insert("padId", (int)pad);
+	event.insert("name", name);
+	event.insert("timestampMs", QDateTime::currentMSecsSinceEpoch());
+	QByteArray event_json = QJsonDocument(event).toJson(QJsonDocument::Compact);
+	QByteArray event_path = qgetenv("CHIAKI_CLOUD_CONTROLLER_EVENTS_PATH");
+	if(!event_path.isEmpty())
+	{
+		QFile file(QString::fromUtf8(event_path));
+		if(file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+		{
+			file.write(event_json);
+			file.write("\n");
+			file.flush();
+		}
+		else
+			CHIAKI_LOGW(GetChiakiLog(), "Could not append Cloud controller event file: %s", file.errorString().toUtf8().constData());
+	}
+	CHIAKI_LOGI(GetChiakiLog(), "CLOUD_CONTROLLER_EVENT %s", event_json.constData());
 }
 
 void StreamSession::WaitHaptics()
