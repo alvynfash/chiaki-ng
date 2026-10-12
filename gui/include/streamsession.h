@@ -42,6 +42,7 @@
 #include <QThread>
 #include <QWaitCondition>
 #include <QAtomicInteger>
+#include <QSet>
 #if CHIAKI_GUI_ENABLE_SPEEX
 #include <QQueue>
 #include <speex/speex_echo.h>
@@ -206,9 +207,11 @@ class StreamSession : public QObject
 		float rumble_multiplier;
 		int ps5_rumble_intensity;
 		int ps5_trigger_intensity;
-		uint8_t led_color[3];
-		uint8_t player_index;
-		QHash<int, Controller *> controllers;
+	uint8_t led_color[4][3];
+	uint8_t player_index;
+	QHash<int, Controller *> controllers;
+	QHash<int, uint8_t> controller_pad_indices;
+	QSet<int> cloud_active_pads;
 #if CHIAKI_GUI_ENABLE_SETSU
 		Setsu *setsu;
 		QMap<QPair<QString, SetsuTrackingId>, uint8_t> setsu_ids;
@@ -380,6 +383,8 @@ class StreamSession : public QObject
 		void HandleKeyboardEvent(QKeyEvent *event);
 		void HandleTouchEvent(QTouchEvent *event, qreal width, qreal height);
 		void HandleDpadTouchEvent(ChiakiControllerState *state, bool placeholder = false);
+		void SendFeedbackStates(bool dpad_placeholder);
+		uint8_t AllocateControllerPad(int device_id);
 		void HandleMouseReleaseEvent(QMouseEvent *event);
 		void HandleMousePressEvent(QMouseEvent *event);
 		void HandleMouseMoveEvent(QMouseEvent *event, qreal width, qreal height);

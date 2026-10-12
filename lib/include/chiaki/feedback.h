@@ -32,6 +32,7 @@ typedef struct chiaki_feedback_state_t
  * @param buf buffer of at least CHIAKI_FEEDBACK_STATE_BUF_SIZE_V9
  */
 CHIAKI_EXPORT void chiaki_feedback_state_format_v9(uint8_t *buf, ChiakiFeedbackState *state);
+CHIAKI_EXPORT void chiaki_feedback_state_format_v9_for_pad(uint8_t *buf, ChiakiFeedbackState *state, uint8_t controller_id);
 
 #define CHIAKI_FEEDBACK_STATE_BUF_SIZE_V12 0x1c
 
@@ -39,6 +40,7 @@ CHIAKI_EXPORT void chiaki_feedback_state_format_v9(uint8_t *buf, ChiakiFeedbackS
  * @param buf buffer of at least CHIAKI_FEEDBACK_STATE_BUF_SIZE_V12
  */
 CHIAKI_EXPORT void chiaki_feedback_state_format_v12(uint8_t *buf, ChiakiFeedbackState *state);
+CHIAKI_EXPORT void chiaki_feedback_state_format_v12_for_pad(uint8_t *buf, ChiakiFeedbackState *state, uint8_t controller_id);
 
 #define CHIAKI_HISTORY_EVENT_SIZE_MAX 0x5
 
@@ -53,6 +55,7 @@ typedef struct chiaki_feedback_history_event_t
  * @param state 0x0 for not pressed, 0xff for pressed, intermediate values for analog triggers
  */
 CHIAKI_EXPORT ChiakiErrorCode chiaki_feedback_history_event_set_button(ChiakiFeedbackHistoryEvent *event, uint64_t button, uint8_t state);
+CHIAKI_EXPORT void chiaki_feedback_history_event_set_presence(ChiakiFeedbackHistoryEvent *event, uint8_t controller_id, bool present);
 
 /**
  * @param pointer_id identifier for the touch from 0 to 127

@@ -232,6 +232,8 @@ typedef struct chiaki_event_t
 		char server_nickname[0x20];
 		ChiakiVideoFecFailureEvent video_fec_failure;
 	};
+	// Pad index for pad-scoped rumble, trigger, light-bar and player-index events.
+	uint8_t controller_id;
 } ChiakiEvent;
 
 typedef void (*ChiakiEventCallback)(ChiakiEvent *event, void *user);
@@ -319,6 +321,8 @@ typedef struct chiaki_session_t
 	ChiakiStreamConnection stream_connection;
 
 	ChiakiControllerState controller_state;
+	ChiakiControllerState controller_states[4];
+	uint8_t player_active_mask;
 } ChiakiSession;
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_session_init(ChiakiSession *session, ChiakiConnectInfo *connect_info, ChiakiLog *log);
@@ -331,6 +335,8 @@ CHIAKI_EXPORT void chiaki_session_send_event(ChiakiSession *session, ChiakiEvent
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_session_request_idr(ChiakiSession *session);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_session_set_controller_state(ChiakiSession *session, ChiakiControllerState *state);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_session_set_controller_state_for_pad(ChiakiSession *session, uint8_t controller_id, ChiakiControllerState *state);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_session_set_player_pad_active(ChiakiSession *session, uint8_t controller_id, bool active);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_session_set_login_pin(ChiakiSession *session, const uint8_t *pin, size_t pin_size);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_session_set_stream_connection_switch_received(ChiakiSession *session);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_session_goto_bed(ChiakiSession *session);

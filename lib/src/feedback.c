@@ -45,7 +45,12 @@ static uint32_t compress_quat(float *q)
 
 CHIAKI_EXPORT void chiaki_feedback_state_format_v9(uint8_t *buf, ChiakiFeedbackState *state)
 {
-	buf[0x0] = 0xa0;
+	chiaki_feedback_state_format_v9_for_pad(buf, state, 0);
+}
+
+CHIAKI_EXPORT void chiaki_feedback_state_format_v9_for_pad(uint8_t *buf, ChiakiFeedbackState *state, uint8_t controller_id)
+{
+	buf[0x0] = 0xa0 | (controller_id & 0x03);
 	uint16_t v = (uint16_t)(0xffff * ((float)state->gyro_x - GYRO_MIN) / (GYRO_MAX - GYRO_MIN));
 	buf[0x1] = v;
 	buf[0x2] = v >> 8;
@@ -78,7 +83,12 @@ CHIAKI_EXPORT void chiaki_feedback_state_format_v9(uint8_t *buf, ChiakiFeedbackS
 
 CHIAKI_EXPORT void chiaki_feedback_state_format_v12(uint8_t *buf, ChiakiFeedbackState *state)
 {
-	chiaki_feedback_state_format_v9(buf, state);
+	chiaki_feedback_state_format_v12_for_pad(buf, state, 0);
+}
+
+CHIAKI_EXPORT void chiaki_feedback_state_format_v12_for_pad(uint8_t *buf, ChiakiFeedbackState *state, uint8_t controller_id)
+{
+	chiaki_feedback_state_format_v9_for_pad(buf, state, controller_id);
 	buf[0x19] = 0x0;
 	buf[0x1a] = 0x0;
 	buf[0x1b] = 0x1;
@@ -151,6 +161,13 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_feedback_history_event_set_button(ChiakiFee
 	event->buf[2] = state;
 	event->len = 3;
 	return CHIAKI_ERR_SUCCESS;
+}
+
+CHIAKI_EXPORT void chiaki_feedback_history_event_set_presence(ChiakiFeedbackHistoryEvent *event, uint8_t controller_id, bool present)
+{
+	event->len = 2;
+	event->buf[0] = 0x80 | controller_id;
+	event->buf[1] = present ? 0xbf : 0x9f;
 }
 
 CHIAKI_EXPORT void chiaki_feedback_history_event_set_touchpad(ChiakiFeedbackHistoryEvent *event,

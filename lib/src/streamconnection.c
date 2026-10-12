@@ -206,6 +206,11 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_init(ChiakiStreamConnecti
 	stream_connection->streaminfo_early_buf_size = 0;
 	stream_connection->player_index = 0;
 	memset(stream_connection->led_state, 0, sizeof(stream_connection->led_state));
+	stream_connection->player_active_mask = 0x01;
+	stream_connection->pending_led_mask = 0;
+	stream_connection->led_state_valid_mask = 0;
+	memset(stream_connection->led_state_by_pad, 0, sizeof(stream_connection->led_state_by_pad));
+	memset(stream_connection->player_index_by_pad, 0xff, sizeof(stream_connection->player_index_by_pad));
 
 	stream_connection->haptic_intensity = Strong;
 	stream_connection->trigger_intensity = Strong;
@@ -483,7 +488,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_run(ChiakiStreamConnectio
 		goto disconnect;
 	}
 	stream_connection->feedback_sender_active = true;
-	chiaki_feedback_sender_set_controller_state(&stream_connection->feedback_sender, &session->controller_state);
+	for(uint8_t i = 0; i < CHIAKI_FEEDBACK_PAD_COUNT; i++)
+		chiaki_feedback_sender_set_controller_state_for_pad(&stream_connection->feedback_sender, i, &session->controller_states[i]);
 	chiaki_mutex_unlock(&stream_connection->feedback_sender_mutex);
 
 	stream_connection->state = STATE_IDLE;
@@ -660,8 +666,21 @@ static void stream_connection_takion_data_rumble(ChiakiStreamConnection *stream_
 				(unsigned long long)buf_size);
 		return;
 	}
+	bool cloud_direct = stream_connection->takion.cloud_direct;
+	uint8_t controller_id = cloud_direct ? buf[0] : 0;
+	if(cloud_direct)
+	{
+		if(controller_id >= CHIAKI_FEEDBACK_PAD_COUNT)
+			return;
+		chiaki_mutex_lock(&stream_connection->state_mutex);
+		bool active = (stream_connection->player_active_mask & (1U << controller_id)) != 0;
+		chiaki_mutex_unlock(&stream_connection->state_mutex);
+		if(!active)
+			return;
+	}
 	ChiakiEvent event = { 0 };
 	event.type = CHIAKI_EVENT_RUMBLE;
+	event.controller_id = controller_id;
 	event.rumble.unknown = buf[0];
 	event.rumble.left = buf[1];
 	event.rumble.right = buf[2];
@@ -677,8 +696,21 @@ static void stream_connection_takion_data_trigger_effects(ChiakiStreamConnection
 				(unsigned long long)buf_size);
 		return;
 	}
+	bool cloud_direct = stream_connection->takion.cloud_direct;
+	uint8_t controller_id = cloud_direct ? buf[0] : 0;
+	if(cloud_direct)
+	{
+		if(controller_id >= CHIAKI_FEEDBACK_PAD_COUNT)
+			return;
+		chiaki_mutex_lock(&stream_connection->state_mutex);
+		bool active = (stream_connection->player_active_mask & (1U << controller_id)) != 0;
+		chiaki_mutex_unlock(&stream_connection->state_mutex);
+		if(!active)
+			return;
+	}
 	ChiakiEvent event = { 0 };
 	event.type = CHIAKI_EVENT_TRIGGER_EFFECTS;
+	event.controller_id = controller_id;
 	event.trigger_effects.type_left = buf[1];
 	event.trigger_effects.type_right = buf[2];
 	memcpy(&event.trigger_effects.left, buf + 5, 10);
@@ -709,23 +741,36 @@ static char* DualSenseIntensity(ChiakiDualSenseEffectIntensity intensity)
 }
 static void stream_connection_takion_data_pad_info(ChiakiStreamConnection *stream_connection, uint8_t *buf, size_t buf_size)
 {
-	bool led_changed = false;
+	bool emit_led = false;
 	bool player_index_changed = false;
 	bool motion_reset = false;
 	bool haptic_intensity_changed = false;
 	bool trigger_intensity_changed = false;
+	uint8_t controller_id = 0xff;
+	uint8_t user_id = 0xff;
+	uint8_t led_color[3] = { 0 };
 
 	CHIAKI_LOGI(stream_connection->log, "Pad info packet (size=%zu):", buf_size);
 	chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_INFO, buf, buf_size);
 
 	switch(buf_size)
 	{
+		case 0x04:
+			// PS5 acknowledgement; it has no player row.
+			return;
+		case 0x07:
+			// PS4 row: [pad][RGB][three opaque bytes].
+			controller_id = buf[0];
+			memcpy(led_color, buf + 1, sizeof(led_color));
+			break;
 		case 0x19:
 		{
-			// sequence number of feedback packet this is responding to
+			// PS5 row begins at byte 8 after the feedback packet metadata.
 			uint16_t feedback_packet_seq_num = ntohs(*(chiaki_unaligned_uint16_t *)(buf));
-			// int16_t unknown = ntohs(*(chiaki_unaligned_uint16_t *)(buf + 2));
 			uint32_t timestamp = ntohs(*(chiaki_unaligned_uint32_t *)(buf + 4));
+			controller_id = buf[8];
+			user_id = buf[15];
+			memcpy(led_color, buf + 9, sizeof(led_color));
 			if(stream_connection->haptic_intensity != buf[20])
 			{
 				stream_connection->haptic_intensity = buf[20];
@@ -741,20 +786,14 @@ static void stream_connection_takion_data_pad_info(ChiakiStreamConnection *strea
 				motion_reset = true;
 				CHIAKI_LOGV(stream_connection->log, "StreamConnection received motion reset request in response to feedback packet with seqnum %"PRIu16"x , %"PRIu32" seconds after stream began", feedback_packet_seq_num, timestamp);
 			}
-			if(buf[8] != stream_connection->player_index)
-			{
-				player_index_changed = true;
-				stream_connection->player_index = buf[8];
-			}
-			if(memcmp(buf + 9, stream_connection->led_state, 3) != 0)
-			{
-				led_changed = true;
-				memcpy(stream_connection->led_state, buf + 9, 3);
-			}
 			break;
 		}
 		case 0x11:
 		{
+			// PS5 row starts at byte zero.
+			controller_id = buf[0];
+			user_id = buf[7];
+			memcpy(led_color, buf + 1, sizeof(led_color));
 			if(stream_connection->haptic_intensity != buf[12])
 			{
 				stream_connection->haptic_intensity = buf[12];
@@ -769,16 +808,6 @@ static void stream_connection_takion_data_pad_info(ChiakiStreamConnection *strea
 			{
 				motion_reset = true;
 			}
-			if(buf[0] != stream_connection->player_index)
-			{
-				player_index_changed = true;
-				stream_connection->player_index = buf[0];
-			}
-			if(memcmp(buf + 1, stream_connection->led_state, 3) != 0)
-			{
-				led_changed = true;
-				memcpy(stream_connection->led_state, buf + 1, 3);
-			}
 			break;
 		}
 		default:
@@ -787,6 +816,50 @@ static void stream_connection_takion_data_pad_info(ChiakiStreamConnection *strea
 					(unsigned long long)buf_size);
 			return;
 		}
+	}
+	if(controller_id >= 4)
+	{
+		CHIAKI_LOGW(stream_connection->log, "Ignoring pad info row with invalid pad %u", controller_id);
+		return;
+	}
+	if(!stream_connection->takion.cloud_direct)
+	{
+		if(controller_id != stream_connection->player_index)
+		{
+			player_index_changed = true;
+			stream_connection->player_index = controller_id;
+		}
+		if(memcmp(led_color, stream_connection->led_state, sizeof(led_color)) != 0)
+		{
+			emit_led = true;
+			memcpy(stream_connection->led_state, led_color, sizeof(led_color));
+		}
+	}
+	else if(user_id != 0) // PS5 user id 0 is a placeholder colour, not a real row.
+	{
+		chiaki_mutex_lock(&stream_connection->state_mutex);
+		uint8_t bit = (uint8_t)(1U << controller_id);
+		if(!(stream_connection->led_state_valid_mask & bit)
+			|| memcmp(stream_connection->led_state_by_pad[controller_id], led_color, sizeof(led_color)) != 0)
+		{
+			memcpy(stream_connection->led_state_by_pad[controller_id], led_color, sizeof(led_color));
+			stream_connection->led_state_valid_mask |= bit;
+			if(stream_connection->player_active_mask & bit)
+				emit_led = true;
+			else
+				stream_connection->pending_led_mask |= bit;
+		}
+		if(stream_connection->player_index_by_pad[controller_id] != controller_id)
+		{
+			stream_connection->player_index_by_pad[controller_id] = controller_id;
+			player_index_changed = true;
+		}
+		if(controller_id == 0)
+		{
+			stream_connection->player_index = controller_id;
+			memcpy(stream_connection->led_state, led_color, sizeof(led_color));
+		}
+		chiaki_mutex_unlock(&stream_connection->state_mutex);
 	}
 	if(motion_reset)
 	{
@@ -811,20 +884,22 @@ static void stream_connection_takion_data_pad_info(ChiakiStreamConnection *strea
 		event.intensity = stream_connection->trigger_intensity;
 		chiaki_session_send_event(stream_connection->session, &event);
 	}
-	if(led_changed)
+	if(emit_led)
 	{
-		CHIAKI_LOGV(stream_connection->log, "Set LED state to - red: %x, green: %x, blue: %x", stream_connection->led_state[0], stream_connection->led_state[1], stream_connection->led_state[2]);
+		CHIAKI_LOGV(stream_connection->log, "Set LED state for pad %u to - red: %x, green: %x, blue: %x", controller_id, led_color[0], led_color[1], led_color[2]);
 		ChiakiEvent event = { 0 };
 		event.type = CHIAKI_EVENT_LED_COLOR;
-		memcpy(event.led_state, stream_connection->led_state, 3);
+		event.controller_id = stream_connection->takion.cloud_direct ? controller_id : 0;
+		memcpy(event.led_state, led_color, sizeof(led_color));
 		chiaki_session_send_event(stream_connection->session, &event);
 	}
 	if(player_index_changed)
 	{
-		CHIAKI_LOGV(stream_connection->log, "Set player index to - %d", stream_connection->player_index);
+		CHIAKI_LOGV(stream_connection->log, "Set player index for pad %u", controller_id);
 		ChiakiEvent event = { 0 };
 		event.type = CHIAKI_EVENT_PLAYER_INDEX;
-		event.player_index = stream_connection->player_index;
+		event.controller_id = stream_connection->takion.cloud_direct ? controller_id : 0;
+		event.player_index = stream_connection->takion.cloud_direct ? controller_id : stream_connection->player_index;
 		chiaki_session_send_event(stream_connection->session, &event);
 	}
 }
@@ -1989,6 +2064,79 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_send_controller_connectio
 	CHIAKI_LOGI(stream_connection->log, "StreamConnection sending CONTROLLERCONNECTION (%zu bytes):", buf_size);
 	chiaki_log_hexdump(stream_connection->log, CHIAKI_LOG_INFO, buf, buf_size);
 	return chiaki_takion_send_message_data(&stream_connection->takion, 1, 1, buf, buf_size, NULL);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_send_controller_connection_for_pad(ChiakiStreamConnection *stream_connection, uint8_t controller_id, bool connected)
+{
+	if(controller_id == 0 || controller_id >= CHIAKI_FEEDBACK_PAD_COUNT)
+		return CHIAKI_ERR_INVALID_DATA;
+	tkproto_ControllerConnectionPayload_ControllerType controller_type;
+	if(!connected)
+		controller_type = tkproto_ControllerConnectionPayload_ControllerType_NOTSET;
+	else if(stream_connection->takion.cloud_direct)
+	{
+		uint32_t primary_controller_id;
+		stream_connection_cloud_controller_variant_from_env(stream_connection, &controller_type, &primary_controller_id);
+		(void)primary_controller_id;
+	}
+	else
+		controller_type = tkproto_ControllerConnectionPayload_ControllerType_DUALSHOCK4;
+
+	tkproto_TakionMessage msg;
+	memset(&msg, 0, sizeof(msg));
+	msg.type = tkproto_TakionMessage_PayloadType_CONTROLLERCONNECTION;
+	msg.has_controller_connection_payload = true;
+	msg.controller_connection_payload.has_connected = true;
+	msg.controller_connection_payload.connected = connected;
+	msg.controller_connection_payload.has_controller_id = true;
+	msg.controller_connection_payload.controller_id = controller_id;
+	msg.controller_connection_payload.has_controller_type = true;
+	msg.controller_connection_payload.controller_type = controller_type;
+
+	uint8_t buf[256];
+	pb_ostream_t stream = pb_ostream_from_buffer(buf, sizeof(buf));
+	if(!pb_encode(&stream, tkproto_TakionMessage_fields, &msg))
+	{
+		CHIAKI_LOGE(stream_connection->log, "StreamConnection multiplayer controller connection protobuf encoding failed");
+		return CHIAKI_ERR_UNKNOWN;
+	}
+	return chiaki_takion_send_message_data(&stream_connection->takion, 1, 1, buf, stream.bytes_written, NULL);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_set_player_pad_active(ChiakiStreamConnection *stream_connection, uint8_t controller_id, bool active)
+{
+	if(controller_id == 0 || controller_id >= CHIAKI_FEEDBACK_PAD_COUNT)
+		return CHIAKI_ERR_INVALID_DATA;
+	ChiakiErrorCode err = chiaki_mutex_lock(&stream_connection->state_mutex);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	uint8_t bit = (uint8_t)(1U << controller_id);
+	ChiakiEvent event = { 0 };
+	bool emit_led = false;
+	if(active)
+	{
+		stream_connection->player_active_mask |= bit;
+		if(stream_connection->pending_led_mask & bit)
+		{
+			event.type = CHIAKI_EVENT_LED_COLOR;
+			event.controller_id = controller_id;
+			memcpy(event.led_state, stream_connection->led_state_by_pad[controller_id], sizeof(event.led_state));
+			stream_connection->pending_led_mask &= (uint8_t)~bit;
+			emit_led = true;
+		}
+	}
+	else
+	{
+		stream_connection->player_active_mask &= (uint8_t)~bit;
+		stream_connection->pending_led_mask &= (uint8_t)~bit;
+		stream_connection->led_state_valid_mask &= (uint8_t)~bit;
+		stream_connection->player_index_by_pad[controller_id] = 0xff;
+		memset(stream_connection->led_state_by_pad[controller_id], 0, sizeof(stream_connection->led_state_by_pad[controller_id]));
+	}
+	chiaki_mutex_unlock(&stream_connection->state_mutex);
+	if(emit_led)
+		chiaki_session_send_event(stream_connection->session, &event);
+	return CHIAKI_ERR_SUCCESS;
 }
 
 static ChiakiErrorCode stream_connection_enable_microphone(ChiakiStreamConnection *stream_connection)
