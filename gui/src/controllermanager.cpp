@@ -758,16 +758,23 @@ QString Controller::GetStableIdentity()
 	SDL_Joystick *js = SDL_GameControllerGetJoystick(controller);
 	if(!js)
 		return QString();
-	const QString guid = GetGUIDString();
+	const QString vendor_product = QStringLiteral("%1:%2")
+		.arg(SDL_JoystickGetVendor(js), 4, 16, QChar('0'))
+		.arg(SDL_JoystickGetProduct(js), 4, 16, QChar('0'));
 #if SDL_VERSION_ATLEAST(2, 0, 14)
 	const char *serial = SDL_JoystickGetSerial(js);
 	if(serial && *serial)
-		return QStringLiteral("serial:%1:%2").arg(guid, QString::fromUtf8(serial));
+		// A device may be re-enumerated on a different SDL transport and receive
+		// a different GUID. Its hardware serial is the physical identity, so do
+		// not include transport-specific GUID data in this key.
+		return QStringLiteral("serial:%1:%2").arg(vendor_product, QString::fromUtf8(serial));
 #endif
 #if SDL_VERSION_ATLEAST(2, 24, 0)
 	const char *path = SDL_JoystickPath(js);
 	if(path && *path)
-		return QStringLiteral("path:%1:%2").arg(guid, QString::fromUtf8(path));
+		// The OS path identifies the attached device; the SDL GUID can vary when
+		// the same controller is exposed through another connection backend.
+		return QStringLiteral("path:%1:%2").arg(vendor_product, QString::fromUtf8(path));
 #endif
 #endif
 	return QString();

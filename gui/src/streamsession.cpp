@@ -16,6 +16,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QList>
 #include <QMutexLocker>
 #include <QtMath>
 #include <atomic>
@@ -1284,11 +1285,13 @@ void StreamSession::UpdateGamepads()
 			const QString stable_identity = controller->GetStableIdentity();
 			uint8_t replacement_pad = 0xff;
 			bool replacement_was_announced = false;
-			// A few backends expose the same physical pad under a new SDL instance
-			// while leaving the old handle apparently attached. Replace the old
-			// instance in place so one device cannot drive two Cloud player slots.
+			// A few backends expose the same physical pad under multiple SDL
+			// instances, sometimes with different transport GUIDs. Keep exactly one
+			// instance for a stable physical identity, including when more than two
+			// aliases were already present.
 			if(!stable_identity.isEmpty())
 			{
+				QList<int> duplicate_instance_ids;
 				for(auto previous_id : controllers.keys())
 				{
 					if(previous_id == controller_id)
@@ -1296,13 +1299,41 @@ void StreamSession::UpdateGamepads()
 					auto previous = controllers.value(previous_id);
 					if(previous->GetStableIdentity() != stable_identity)
 						continue;
-					CHIAKI_LOGW(GetChiakiLog(), "Replacing stale controller instance %d with %d for the same physical pad",
+					duplicate_instance_ids.append(previous_id);
+					uint8_t previous_pad = controller_pad_indices.value(previous_id, 0xff);
+					if(previous_pad < replacement_pad)
+						replacement_pad = previous_pad;
+				}
+				for(auto previous_id : duplicate_instance_ids)
+				{
+					auto previous = controllers.value(previous_id);
+					uint8_t previous_pad = controller_pad_indices.take(previous_id);
+					const bool previous_was_announced = cloud_controller_announced.remove(previous_id);
+					CHIAKI_LOGW(GetChiakiLog(), "Replacing duplicate controller instance %d with %d for the same physical pad",
 							previous_id, controller_id);
-					replacement_pad = controller_pad_indices.take(previous_id);
-					replacement_was_announced = cloud_controller_announced.remove(previous_id);
+					if(previous_pad < 4 && previous_pad != replacement_pad)
+					{
+						// Repair a duplicate assignment that may have been created before
+						// the aliases were recognized. Neutralize and retire its extra pad.
+						ChiakiControllerState idle_state;
+						chiaki_controller_state_set_idle(&idle_state);
+						chiaki_session_set_controller_state_for_pad(&session, previous_pad, &idle_state);
+						if(session.connect_info.cloud_direct && previous_pad > 0 && cloud_active_pads.contains(previous_pad))
+						{
+							ChiakiErrorCode leave_err = chiaki_session_set_player_pad_active(&session, previous_pad, false);
+							if(leave_err == CHIAKI_ERR_SUCCESS)
+								cloud_active_pads.remove(previous_pad);
+							else
+								CHIAKI_LOGW(GetChiakiLog(), "Failed to retire duplicate Cloud controller pad %u; retaining it for retry: %s",
+										previous_pad, chiaki_error_string(leave_err));
+						}
+						if(session.connect_info.cloud_direct && previous_was_announced)
+							EmitCloudControllerEvent("controller_disconnected", previous_pad, previous->GetName());
+					}
+					else if(previous_pad == replacement_pad)
+						replacement_was_announced = replacement_was_announced || previous_was_announced;
 					controllers.remove(previous_id);
 					previous->Unref();
-					break;
 				}
 			}
 			CHIAKI_LOGI(log.GetChiakiLog(), "Controller %d opened: \"%s\"", controller_id, controller->GetName().toLocal8Bit().constData());
