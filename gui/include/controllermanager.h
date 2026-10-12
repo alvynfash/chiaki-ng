@@ -31,6 +31,7 @@ class ControllerManager : public QObject
 	private:
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 		QSet<SDL_JoystickID> available_controllers;
+		QSet<SDL_JoystickID> ignored_backend_aliases;
 #endif
 		QMap<int, Controller *> open_controllers;
 		bool creating_controller_mapping;

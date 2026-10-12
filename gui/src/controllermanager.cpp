@@ -5,9 +5,11 @@
 #include <QCoreApplication>
 #include <QByteArray>
 #include <QTimer>
+#include <QDebug>
 
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 #include <SDL.h>
+#include <controllerbackend.h>
 #endif
 
 /* PS5 trigger effect documentation:
@@ -207,6 +209,7 @@ void ControllerManager::UpdateAvailableControllers()
 {
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
 	QSet<SDL_JoystickID> current_controllers;
+	QSet<SDL_JoystickID> current_backend_aliases;
 	for(int i=0; i<SDL_NumJoysticks(); i++)
 	{
 		if(!SDL_IsGameController(i))
@@ -214,6 +217,26 @@ void ControllerManager::UpdateAvailableControllers()
 
 		// We'll try to identify pads with Motion Control
 		SDL_JoystickGUID guid = SDL_JoystickGetDeviceGUID(i);
+#ifdef Q_OS_MACOS
+		// SDL's GCController/MFI driver can announce a Sony pad before HIDAPI
+		// notices it during hotplug. Its synthetic VID/PID, missing path and
+		// missing serial cannot be matched to the physical HIDAPI device later.
+		// Use one backend for Sony pads whenever the direct HIDAPI driver is
+		// enabled, before either report can claim a player slot. Keep MFI for
+		// other families and for explicitly disabled Sony HIDAPI drivers.
+		// SDL marks MFI GUIDs with 'm' in byte 14 (SDL_mfijoystick.m).
+		SDL_bool hidapi_enabled = SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI, SDL_TRUE);
+		if(IgnoreMacOSControllerAlias(guid, SDL_GameControllerTypeForIndex(i),
+				SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_PS4, hidapi_enabled),
+				SDL_GetHintBoolean(SDL_HINT_JOYSTICK_HIDAPI_PS5, hidapi_enabled)))
+		{
+			SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(i);
+			current_backend_aliases.insert(id);
+			if(!ignored_backend_aliases.contains(id))
+				qInfo("Ignoring macOS MFI controller alias %d; Sony input is owned by HIDAPI", id);
+			continue;
+		}
+#endif
 		char guid_str[256];
 		SDL_JoystickGetGUIDString(guid, guid_str, sizeof(guid_str));
 
@@ -232,6 +255,7 @@ void ControllerManager::UpdateAvailableControllers()
 		current_controllers.insert(SDL_JoystickGetDeviceInstanceID(i));
 	}
 
+	ignored_backend_aliases = std::move(current_backend_aliases);
 	if(current_controllers != available_controllers)
 	{
 		available_controllers = std::move(current_controllers);

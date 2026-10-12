@@ -26,6 +26,12 @@ endif()
 add_executable(chiaki-unit ${CHIAKI_UNIT_SOURCES})
 add_test(NAME unit COMMAND chiaki-unit)
 
+if(CHIAKI_ENABLE_GUI AND CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER)
+	add_executable(controller-backend-test controllerbackend.cpp)
+	target_link_libraries(controller-backend-test SDL2::SDL2)
+	add_test(NAME controller-backend COMMAND controller-backend-test)
+endif()
+
 target_link_libraries(chiaki-unit chiaki-lib munit)
 
 if(CHIAKI_ENABLE_FFMPEG_DECODER)
