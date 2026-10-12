@@ -1282,14 +1282,13 @@ void StreamSession::UpdateGamepads()
 				CHIAKI_LOGE(log.GetChiakiLog(), "Failed to open controller %d", controller_id);
 				continue;
 			}
-			const QString stable_identity = controller->GetStableIdentity();
+			const QStringList stable_identities = controller->GetStableIdentities();
 			uint8_t replacement_pad = 0xff;
 			bool replacement_was_announced = false;
 			// A few backends expose the same physical pad under multiple SDL
-			// instances, sometimes with different transport GUIDs. Keep exactly one
-			// instance for a stable physical identity, including when more than two
-			// aliases were already present.
-			if(!stable_identity.isEmpty())
+			// instances with different GUIDs, product IDs, or serial availability.
+			// Match every identity the OS provides and keep exactly one SDL handle.
+			if(!stable_identities.isEmpty())
 			{
 				QList<int> duplicate_instance_ids;
 				for(auto previous_id : controllers.keys())
@@ -1297,7 +1296,15 @@ void StreamSession::UpdateGamepads()
 					if(previous_id == controller_id)
 						continue;
 					auto previous = controllers.value(previous_id);
-					if(previous->GetStableIdentity() != stable_identity)
+					const QStringList previous_identities = previous->GetStableIdentities();
+					bool same_physical_controller = false;
+					for(const QString &identity : stable_identities)
+						if(previous_identities.contains(identity))
+						{
+							same_physical_controller = true;
+							break;
+						}
+					if(!same_physical_controller)
 						continue;
 					duplicate_instance_ids.append(previous_id);
 					uint8_t previous_pad = controller_pad_indices.value(previous_id, 0xff);

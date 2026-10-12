@@ -9,6 +9,7 @@
 #include <QSet>
 #include <QMap>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 
 #ifdef CHIAKI_GUI_ENABLE_SDL_GAMECONTROLLER
@@ -127,7 +128,7 @@ class Controller : public QObject
 		QString GetType();
 		bool IsPS();
 		QString GetGUIDString();
-		QString GetStableIdentity();
+		QStringList GetStableIdentities();
 		ChiakiControllerState GetState();
 		void SetRumble(uint8_t left, uint8_t right);
 		void SetTriggerEffects(uint8_t type_left, const uint8_t *data_left, uint8_t type_right, const uint8_t *data_right);
