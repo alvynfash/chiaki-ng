@@ -48,6 +48,11 @@ typedef struct chiaki_stream_connection_t
 	uint8_t player_index;
 	ChiakiDualSenseEffectIntensity haptic_intensity;
 	ChiakiDualSenseEffectIntensity trigger_intensity;
+	uint8_t player_active_mask;
+	uint8_t pending_led_mask;
+	uint8_t led_state_by_pad[4][3];
+	uint8_t led_state_valid_mask;
+	uint8_t player_index_by_pad[4];
 	ChiakiFeedbackSender feedback_sender;
 	ChiakiCongestionControl congestion_control;
 	/**
@@ -103,6 +108,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_stop(ChiakiStreamConnecti
 CHIAKI_EXPORT ChiakiErrorCode stream_connection_send_corrupt_frame(ChiakiStreamConnection *stream_connection, ChiakiSeqNum16 start, ChiakiSeqNum16 end);
 CHIAKI_EXPORT ChiakiErrorCode stream_connection_send_idr_request(ChiakiStreamConnection *stream_connection);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_send_controller_connection(ChiakiStreamConnection *stream_connection);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_send_controller_connection_for_pad(ChiakiStreamConnection *stream_connection, uint8_t controller_id, bool connected);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_stream_connection_set_player_pad_active(ChiakiStreamConnection *stream_connection, uint8_t controller_id, bool active);
 
 #ifdef __cplusplus
 }

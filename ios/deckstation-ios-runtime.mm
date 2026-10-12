@@ -786,6 +786,77 @@ extern "C" int32_t deckstation_ios_runtime_send_controller_state(
 		: CHIAKI_ERR_UNINITIALIZED;
 }
 
+extern "C" int32_t deckstation_ios_runtime_send_controller_state_for_pad(
+	uint8_t controller_id,
+	int32_t buttons, int32_t l2_state, int32_t r2_state,
+	int32_t left_x, int32_t left_y, int32_t right_x, int32_t right_y,
+	int32_t touch0_id, int32_t touch0_x, int32_t touch0_y,
+	int32_t touch1_id, int32_t touch1_x, int32_t touch1_y)
+{
+	if(controller_id >= 4)
+		return CHIAKI_ERR_INVALID_DATA;
+	ChiakiControllerState state;
+	chiaki_controller_state_set_idle(&state);
+	state.buttons = static_cast<uint32_t>(buttons);
+	state.l2_state = static_cast<uint8_t>(l2_state);
+	state.r2_state = static_cast<uint8_t>(r2_state);
+	state.left_x = static_cast<int16_t>(left_x);
+	state.left_y = static_cast<int16_t>(left_y);
+	state.right_x = static_cast<int16_t>(right_x);
+	state.right_y = static_cast<int16_t>(right_y);
+	state.touches[0].id = static_cast<int8_t>(touch0_id);
+	state.touches[0].x = static_cast<uint16_t>(touch0_x);
+	state.touches[0].y = static_cast<uint16_t>(touch0_y);
+	state.touches[1].id = static_cast<int8_t>(touch1_id);
+	state.touches[1].x = static_cast<uint16_t>(touch1_x);
+	state.touches[1].y = static_cast<uint16_t>(touch1_y);
+
+	std::lock_guard<std::mutex> lock(session_mutex);
+	return active_session && active_session->session_initialized
+		? chiaki_session_set_controller_state_for_pad(
+			&active_session->session, controller_id, &state)
+		: CHIAKI_ERR_UNINITIALIZED;
+}
+
+extern "C" int32_t deckstation_ios_runtime_set_player_pad_active(
+	uint8_t controller_id, uint8_t active_value, const char *name)
+{
+	if(controller_id == 0 || controller_id >= 4)
+		return CHIAKI_ERR_INVALID_DATA;
+	std::lock_guard<std::mutex> lock(session_mutex);
+	RuntimeSession *runtime = active_session;
+	if(!runtime || !runtime->session_initialized)
+		return CHIAKI_ERR_UNINITIALIZED;
+	if(!runtime->session.connect_info.cloud_direct)
+		return CHIAKI_ERR_INVALID_DATA;
+
+	const bool active = active_value != 0;
+	const uint8_t bit = static_cast<uint8_t>(1U << controller_id);
+	if(chiaki_mutex_lock(&runtime->session.state_mutex) != CHIAKI_ERR_SUCCESS)
+		return CHIAKI_ERR_UNKNOWN;
+	const bool was_active = (runtime->session.player_active_mask & bit) != 0;
+	chiaki_mutex_unlock(&runtime->session.state_mutex);
+	if(was_active == active)
+		return CHIAKI_ERR_SUCCESS;
+
+	ChiakiErrorCode error = CHIAKI_ERR_SUCCESS;
+	if(!active)
+	{
+		ChiakiControllerState idle_state;
+		chiaki_controller_state_set_idle(&idle_state);
+		error = chiaki_session_set_controller_state_for_pad(
+			&runtime->session, controller_id, &idle_state);
+		if(error != CHIAKI_ERR_SUCCESS)
+			return error;
+	}
+	error = chiaki_session_set_player_pad_active(
+		&runtime->session, controller_id, active);
+	if(error == CHIAKI_ERR_SUCCESS)
+		emit(runtime, "controllerChanged", name ? name : "",
+			controller_id, active ? 1 : 0);
+	return error;
+}
+
 extern "C" const char *deckstation_ios_runtime_set_cloud_controller_variant(
 	const char *value)
 {

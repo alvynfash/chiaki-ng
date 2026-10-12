@@ -208,6 +208,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_session_init(ChiakiSession *session, Chiaki
 
 	chiaki_mutex_lock(&session->state_mutex);
 	session->should_stop = false;
+	session->player_active_mask = 0x01;
 	session->ctrl_session_id_received = false;
 	session->ctrl_login_pin_requested = false;
 	session->login_pin_entered = false;
@@ -257,6 +258,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_session_init(ChiakiSession *session, Chiaki
 	}
 
 	chiaki_controller_state_set_idle(&session->controller_state);
+	for(uint8_t i = 0; i < 4; i++)
+		chiaki_controller_state_set_idle(&session->controller_states[i]);
 
 	session->connect_info.ps5 = connect_info->ps5;
 	const uint8_t did_prefix[] = { 0x00, 0x18, 0x00, 0x00, 0x00, 0x07, 0x00, 0x40, 0x00, 0x80 };
@@ -361,14 +364,86 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_session_request_idr(ChiakiSession *session)
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_session_set_controller_state(ChiakiSession *session, ChiakiControllerState *state)
 {
+	return chiaki_session_set_controller_state_for_pad(session, 0, state);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_session_set_controller_state_for_pad(ChiakiSession *session, uint8_t controller_id, ChiakiControllerState *state)
+{
+	if(controller_id >= 4 || !state)
+		return CHIAKI_ERR_INVALID_DATA;
 	ChiakiErrorCode err = chiaki_mutex_lock(&session->stream_connection.feedback_sender_mutex);
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
-	session->controller_state = *state;
+	session->controller_states[controller_id] = *state;
+	if(controller_id == 0)
+		session->controller_state = *state;
 	if(session->stream_connection.feedback_sender_active)
-		chiaki_feedback_sender_set_controller_state(&session->stream_connection.feedback_sender, &session->controller_state);
+		chiaki_feedback_sender_set_controller_state_for_pad(&session->stream_connection.feedback_sender, controller_id, &session->controller_states[controller_id]);
 	chiaki_mutex_unlock(&session->stream_connection.feedback_sender_mutex);
 	return CHIAKI_ERR_SUCCESS;
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_session_set_player_pad_active(ChiakiSession *session, uint8_t controller_id, bool active)
+{
+	if(controller_id == 0 || controller_id >= 4)
+		return CHIAKI_ERR_INVALID_DATA;
+	uint8_t bit = (uint8_t)(1U << controller_id);
+	bool cloud_direct = session->connect_info.cloud_direct;
+	ChiakiErrorCode err = chiaki_mutex_lock(&session->state_mutex);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	bool was_active = (session->player_active_mask & bit) != 0;
+	chiaki_mutex_unlock(&session->state_mutex);
+	if(was_active == active)
+		return CHIAKI_ERR_SUCCESS;
+
+	if(cloud_direct)
+	{
+		err = chiaki_mutex_lock(&session->stream_connection.feedback_sender_mutex);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
+		bool stream_ready = session->stream_connection.feedback_sender_active;
+		chiaki_mutex_unlock(&session->stream_connection.feedback_sender_mutex);
+		if(!stream_ready)
+			return CHIAKI_ERR_INVALID_DATA;
+
+		// Cloud-direct has no Remote Play control socket. Use the Cloud Takion
+		// controller announcement for both join and leave before the matching
+		// presence event is queued on the feedback-history channel.
+		err = chiaki_stream_connection_send_controller_connection_for_pad(&session->stream_connection, controller_id, active);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
+	}
+
+	err = chiaki_mutex_lock(&session->state_mutex);
+	if(err != CHIAKI_ERR_SUCCESS)
+	{
+		if(cloud_direct)
+			chiaki_stream_connection_send_controller_connection_for_pad(&session->stream_connection, controller_id, !active);
+		return err;
+	}
+	if(active)
+		session->player_active_mask |= bit;
+	else
+		session->player_active_mask &= (uint8_t)~bit;
+	chiaki_mutex_unlock(&session->state_mutex);
+
+	err = chiaki_mutex_lock(&session->stream_connection.feedback_sender_mutex);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	if(session->stream_connection.feedback_sender_active)
+		err = chiaki_feedback_sender_set_pad_active(&session->stream_connection.feedback_sender, controller_id, active);
+	chiaki_mutex_unlock(&session->stream_connection.feedback_sender_mutex);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	err = chiaki_stream_connection_set_player_pad_active(&session->stream_connection, controller_id, active);
+	if(err != CHIAKI_ERR_SUCCESS)
+	{
+		if(cloud_direct && active)
+			chiaki_stream_connection_send_controller_connection_for_pad(&session->stream_connection, controller_id, false);
+		return err;
+	}
+	return err;
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_session_set_login_pin(ChiakiSession *session, const uint8_t *pin, size_t pin_size)

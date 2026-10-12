@@ -1057,22 +1057,27 @@ beach:
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_state(ChiakiTakion *takion, ChiakiSeqNum16 seq_num, ChiakiFeedbackState *feedback_state)
 {
+	return chiaki_takion_send_feedback_state_for_pad(takion, seq_num, feedback_state, 0);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_state_for_pad(ChiakiTakion *takion, ChiakiSeqNum16 seq_num, ChiakiFeedbackState *feedback_state, uint8_t controller_id)
+{
 	uint8_t buf[0xc + CHIAKI_FEEDBACK_STATE_BUF_SIZE_MAX];
 	buf[0] = TAKION_PACKET_TYPE_FEEDBACK_STATE;
 	*((chiaki_unaligned_uint16_t *)(buf + 1)) = htons(seq_num);
-	buf[3] = 0; // TODO
+	buf[3] = takion->cloud_direct ? 0 : 1;
 	*((chiaki_unaligned_uint32_t *)(buf + 4)) = 0; // key pos
 	*((chiaki_unaligned_uint32_t *)(buf + 8)) = 0; // gmac
 	size_t buf_sz;
 	if(takion->version <= 9)
 	{
 		buf_sz = 0xc + CHIAKI_FEEDBACK_STATE_BUF_SIZE_V9;
-		chiaki_feedback_state_format_v9(buf + 0xc, feedback_state);
+		chiaki_feedback_state_format_v9_for_pad(buf + 0xc, feedback_state, controller_id);
 	}
 	else
 	{
 		buf_sz = 0xc + CHIAKI_FEEDBACK_STATE_BUF_SIZE_V12;
-		chiaki_feedback_state_format_v12(buf + 0xc, feedback_state);
+		chiaki_feedback_state_format_v12_for_pad(buf + 0xc, feedback_state, controller_id);
 	}
 	return takion_send_feedback_packet(takion, buf, buf_sz);
 }
@@ -1115,6 +1120,11 @@ beach:
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_history(ChiakiTakion *takion, ChiakiSeqNum16 seq_num, uint8_t *payload, size_t payload_size)
 {
+	return chiaki_takion_send_feedback_history_with_event_count(takion, seq_num, payload, payload_size, 0);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_history_with_event_count(ChiakiTakion *takion, ChiakiSeqNum16 seq_num, uint8_t *payload, size_t payload_size, uint8_t event_count)
+{
 	size_t padded_payload_size = payload_size;
 	if(takion->cloud_direct && padded_payload_size < TAKION_CLOUD_FEEDBACK_HISTORY_PAYLOAD_SIZE)
 		padded_payload_size = TAKION_CLOUD_FEEDBACK_HISTORY_PAYLOAD_SIZE;
@@ -1125,7 +1135,9 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_history(ChiakiTakion *
 		return CHIAKI_ERR_MEMORY;
 	buf[0] = TAKION_PACKET_TYPE_FEEDBACK_HISTORY;
 	*((chiaki_unaligned_uint16_t *)(buf + 1)) = htons(seq_num);
-	buf[3] = 0; // TODO
+	// Keep the cloud-direct header identical to the known-good single-pad
+	// path; standard Remote Play sessions advertise the actual event count.
+	buf[3] = takion->cloud_direct ? 0 : event_count;
 	*((chiaki_unaligned_uint32_t *)(buf + 4)) = 0; // key pos
 	*((chiaki_unaligned_uint32_t *)(buf + 8)) = 0; // gmac
 	memcpy(buf + 0xc, payload, payload_size);

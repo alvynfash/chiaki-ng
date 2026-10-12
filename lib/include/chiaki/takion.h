@@ -249,12 +249,14 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_congestion(ChiakiTakion *takion
  * Thread-safe while Takion is running.
  */
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_state(ChiakiTakion *takion, ChiakiSeqNum16 seq_num, ChiakiFeedbackState *feedback_state);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_state_for_pad(ChiakiTakion *takion, ChiakiSeqNum16 seq_num, ChiakiFeedbackState *feedback_state, uint8_t controller_id);
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_mic_packet(ChiakiTakion *takion, uint8_t *audio_packet, size_t packet_size, bool ps5);
 /**
  * Thread-safe while Takion is running.
  */
 CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_history(ChiakiTakion *takion, ChiakiSeqNum16 seq_num, uint8_t *payload, size_t payload_size);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_takion_send_feedback_history_with_event_count(ChiakiTakion *takion, ChiakiSeqNum16 seq_num, uint8_t *payload, size_t payload_size, uint8_t event_count);
 
 #define CHIAKI_TAKION_V9_AV_HEADER_SIZE_VIDEO 0x17
 #define CHIAKI_TAKION_V9_AV_HEADER_SIZE_AUDIO 0x12
