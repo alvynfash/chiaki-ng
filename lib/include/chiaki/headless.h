@@ -134,6 +134,7 @@ typedef enum chiaki_headless_event_type_t
 	CHIAKI_HEADLESS_EVENT_STREAM_STATS,
 	CHIAKI_HEADLESS_EVENT_WARNING,
 	CHIAKI_HEADLESS_EVENT_ERROR,
+	CHIAKI_HEADLESS_EVENT_CONTROLLER_CHANGED,
 } ChiakiHeadlessEventType;
 
 typedef struct chiaki_headless_event_t
@@ -151,6 +152,13 @@ typedef struct chiaki_headless_event_t
 		{
 			const char *message;
 		} warning;
+		struct
+		{
+			uint8_t controller_id;
+			bool connected;
+			/* Borrowed until event_cb returns; copy before deferred dispatch. */
+			const char *name;
+		} controller;
 	};
 } ChiakiHeadlessEvent;
 
@@ -996,6 +1004,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_stop(ChiakiHeadlessSession
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_join(ChiakiHeadlessSession *session);
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_send_controller_state(ChiakiHeadlessSession *session, ChiakiControllerState *state);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_send_controller_state_for_pad(ChiakiHeadlessSession *session, uint8_t controller_id, ChiakiControllerState *state);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_set_player_pad_active(ChiakiHeadlessSession *session, uint8_t controller_id, bool active, const char *name);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_request_idr(ChiakiHeadlessSession *session);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_toggle_microphone(ChiakiHeadlessSession *session, bool muted);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_go_home(ChiakiHeadlessSession *session);
@@ -1165,6 +1175,25 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_with
 	int8_t touch_1_id,
 	uint16_t touch_1_x,
 	uint16_t touch_1_y);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_for_pad_with_touches_compat(
+	uint8_t controller_id,
+	uint32_t buttons,
+	uint8_t l2_state,
+	uint8_t r2_state,
+	int16_t left_x,
+	int16_t left_y,
+	int16_t right_x,
+	int16_t right_y,
+	int8_t touch_0_id,
+	uint16_t touch_0_x,
+	uint16_t touch_0_y,
+	int8_t touch_1_id,
+	uint16_t touch_1_x,
+	uint16_t touch_1_y);
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_player_pad_active(
+	uint8_t controller_id,
+	bool active,
+	const char *name);
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_tap_button(uint32_t button_mask);
 /**
  * Configure logging for future runtime-managed sessions.

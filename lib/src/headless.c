@@ -1731,9 +1731,12 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_join(ChiakiHeadlessSession
 	return err;
 }
 
-CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_send_controller_state(ChiakiHeadlessSession *s, ChiakiControllerState *state)
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_send_controller_state_for_pad(
+	ChiakiHeadlessSession *s,
+	uint8_t controller_id,
+	ChiakiControllerState *state)
 {
-	if(!s || !state)
+	if(!s || !state || controller_id >= 4)
 		return CHIAKI_ERR_INVALID_DATA;
 
 	bool non_idle = state->buttons
@@ -1743,7 +1746,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_send_controller_state(Chia
 		|| state->left_y
 		|| state->right_x
 		|| state->right_y;
-	if(s->session.connect_info.cloud_direct
+	if(controller_id == 0
+		&& s->session.connect_info.cloud_direct
 		&& non_idle
 		&& s->ready_event_count > 0
 		&& !s->runtime_controller_connection_refreshed_on_input)
@@ -1755,7 +1759,54 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_send_controller_state(Chia
 			CHIAKI_LOGW(s->log, "Headless runtime controller connection refresh failed: %d", conn_err);
 	}
 
-	return chiaki_session_set_controller_state(&s->session, state);
+	return chiaki_session_set_controller_state_for_pad(&s->session, controller_id, state);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_send_controller_state(
+	ChiakiHeadlessSession *s,
+	ChiakiControllerState *state)
+{
+	return chiaki_headless_session_send_controller_state_for_pad(s, 0, state);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_set_player_pad_active(
+	ChiakiHeadlessSession *s,
+	uint8_t controller_id,
+	bool active,
+	const char *name)
+{
+	if(!s || controller_id == 0 || controller_id >= 4
+		|| !s->session.connect_info.cloud_direct)
+		return CHIAKI_ERR_INVALID_DATA;
+
+	ChiakiErrorCode err = chiaki_mutex_lock(&s->session.state_mutex);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+	uint8_t bit = (uint8_t)(1U << controller_id);
+	bool was_active = (s->session.player_active_mask & bit) != 0;
+	chiaki_mutex_unlock(&s->session.state_mutex);
+	if(was_active == active)
+		return CHIAKI_ERR_SUCCESS;
+	if(!active)
+	{
+		ChiakiControllerState idle_state;
+		chiaki_controller_state_set_idle(&idle_state);
+		err = chiaki_session_set_controller_state_for_pad(&s->session, controller_id, &idle_state);
+		if(err != CHIAKI_ERR_SUCCESS)
+			return err;
+	}
+
+	err = chiaki_session_set_player_pad_active(&s->session, controller_id, active);
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+
+	ChiakiHeadlessEvent event = {0};
+	event.type = CHIAKI_HEADLESS_EVENT_CONTROLLER_CHANGED;
+	event.controller.controller_id = controller_id;
+	event.controller.connected = active;
+	event.controller.name = name;
+	headless_emit_event(s, &event);
+	return CHIAKI_ERR_SUCCESS;
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_request_idr(ChiakiHeadlessSession *s)
@@ -1780,7 +1831,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_session_set_login_pin(ChiakiHeadle
 
 CHIAKI_EXPORT uint32_t chiaki_headless_api_version(void)
 {
-	return 42;
+	return 43;
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_probe(void)
@@ -2294,7 +2345,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_comp
 	int16_t right_x,
 	int16_t right_y)
 {
-	return chiaki_headless_runtime_send_controller_state_with_touches_compat(
+	return chiaki_headless_runtime_send_controller_state_for_pad_with_touches_compat(
+		0,
 		buttons,
 		l2_state,
 		r2_state,
@@ -2325,6 +2377,29 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_with
 	uint16_t touch_1_x,
 	uint16_t touch_1_y)
 {
+	return chiaki_headless_runtime_send_controller_state_for_pad_with_touches_compat(
+		0, buttons, l2_state, r2_state, left_x, left_y, right_x, right_y,
+		touch_0_id, touch_0_x, touch_0_y, touch_1_id, touch_1_x, touch_1_y);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_for_pad_with_touches_compat(
+	uint8_t controller_id,
+	uint32_t buttons,
+	uint8_t l2_state,
+	uint8_t r2_state,
+	int16_t left_x,
+	int16_t left_y,
+	int16_t right_x,
+	int16_t right_y,
+	int8_t touch_0_id,
+	uint16_t touch_0_x,
+	uint16_t touch_0_y,
+	int8_t touch_1_id,
+	uint16_t touch_1_x,
+	uint16_t touch_1_y)
+{
+	if(controller_id >= 4)
+		return CHIAKI_ERR_INVALID_DATA;
 	ChiakiErrorCode err = headless_runtime_ensure_lock();
 	if(err != CHIAKI_ERR_SUCCESS)
 		return err;
@@ -2350,7 +2425,26 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_send_controller_state_with
 	state.touches[1].id = touch_1_id;
 	state.touches[1].x = touch_1_x;
 	state.touches[1].y = touch_1_y;
-	return chiaki_headless_session_send_controller_state(session, &state);
+	return chiaki_headless_session_send_controller_state_for_pad(session, controller_id, &state);
+}
+
+CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_set_player_pad_active(
+	uint8_t controller_id,
+	bool active,
+	const char *name)
+{
+	if(controller_id == 0 || controller_id >= 4)
+		return CHIAKI_ERR_INVALID_DATA;
+	ChiakiErrorCode err = headless_runtime_ensure_lock();
+	if(err != CHIAKI_ERR_SUCCESS)
+		return err;
+
+	chiaki_mutex_lock(&g_runtime_lock);
+	ChiakiHeadlessSession *session = g_runtime_session;
+	chiaki_mutex_unlock(&g_runtime_lock);
+	if(!session)
+		return CHIAKI_ERR_INVALID_DATA;
+	return chiaki_headless_session_set_player_pad_active(session, controller_id, active, name);
 }
 
 CHIAKI_EXPORT ChiakiErrorCode chiaki_headless_runtime_tap_button(uint32_t button_mask)

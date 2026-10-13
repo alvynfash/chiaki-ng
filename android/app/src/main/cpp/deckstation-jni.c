@@ -660,6 +660,96 @@ static jint deckstation_native_send_controller_state(
 	return err;
 }
 
+static jint deckstation_native_send_controller_state_for_pad(
+	JNIEnv *env, jobject bridge, jint controller_id,
+	 jint buttons, jint l2_state, jint r2_state,
+	 jint left_x, jint left_y, jint right_x, jint right_y,
+	 jint touch0_id, jint touch0_x, jint touch0_y,
+	 jint touch1_id, jint touch1_x, jint touch1_y)
+{
+	(void)env;
+	(void)bridge;
+	if(controller_id < 0 || controller_id >= 4)
+		return CHIAKI_ERR_INVALID_DATA;
+	ChiakiControllerState state;
+	chiaki_controller_state_set_idle(&state);
+	state.buttons = (uint32_t)buttons;
+	state.l2_state = (uint8_t)l2_state;
+	state.r2_state = (uint8_t)r2_state;
+	state.left_x = (int16_t)left_x;
+	state.left_y = (int16_t)left_y;
+	state.right_x = (int16_t)right_x;
+	state.right_y = (int16_t)right_y;
+	state.touches[0].id = (int8_t)touch0_id;
+	state.touches[0].x = (uint16_t)touch0_x;
+	state.touches[0].y = (uint16_t)touch0_y;
+	state.touches[1].id = (int8_t)touch1_id;
+	state.touches[1].x = (uint16_t)touch1_x;
+	state.touches[1].y = (uint16_t)touch1_y;
+
+	pthread_mutex_lock(&g_session_mutex);
+	ChiakiErrorCode err = g_session && g_session->session_init
+		? chiaki_session_set_controller_state_for_pad(
+			&g_session->session, (uint8_t)controller_id, &state)
+		: CHIAKI_ERR_UNINITIALIZED;
+	pthread_mutex_unlock(&g_session_mutex);
+	return err;
+}
+
+static jint deckstation_native_set_player_pad_active(
+	JNIEnv *env, jobject bridge, jint controller_id, jboolean active_value,
+	jstring name_value)
+{
+	(void)bridge;
+	if(controller_id < 1 || controller_id >= 4)
+		return CHIAKI_ERR_INVALID_DATA;
+	const char *name = name_value
+		? (*env)->GetStringUTFChars(env, name_value, NULL) : NULL;
+	pthread_mutex_lock(&g_session_mutex);
+	DeckStationAndroidSession *session = g_session;
+	ChiakiErrorCode err = CHIAKI_ERR_UNINITIALIZED;
+	if(session && session->session_init)
+	{
+		if(!session->session.connect_info.cloud_direct)
+			err = CHIAKI_ERR_INVALID_DATA;
+		else
+		{
+			const bool active = active_value == JNI_TRUE;
+			const uint8_t bit = (uint8_t)(1U << controller_id);
+			if(chiaki_mutex_lock(&session->session.state_mutex) != CHIAKI_ERR_SUCCESS)
+				err = CHIAKI_ERR_UNKNOWN;
+			else
+			{
+				const bool was_active = (session->session.player_active_mask & bit) != 0;
+				chiaki_mutex_unlock(&session->session.state_mutex);
+				if(was_active == active)
+					err = CHIAKI_ERR_SUCCESS;
+				else
+				{
+					err = CHIAKI_ERR_SUCCESS;
+					if(!active)
+					{
+						ChiakiControllerState idle_state;
+						chiaki_controller_state_set_idle(&idle_state);
+						err = chiaki_session_set_controller_state_for_pad(
+							&session->session, (uint8_t)controller_id, &idle_state);
+					}
+					if(err == CHIAKI_ERR_SUCCESS)
+						err = chiaki_session_set_player_pad_active(
+							&session->session, (uint8_t)controller_id, active);
+					if(err == CHIAKI_ERR_SUCCESS)
+						deckstation_emit(session, "controllerChanged",
+							name ? name : "", controller_id, active ? 1 : 0);
+				}
+			}
+		}
+	}
+	pthread_mutex_unlock(&g_session_mutex);
+	if(name)
+		(*env)->ReleaseStringUTFChars(env, name_value, name);
+	return err;
+}
+
 static jstring deckstation_native_set_cloud_controller_variant(
 	JNIEnv *env, jobject bridge, jstring value)
 {
@@ -687,6 +777,16 @@ int deckstation_jni_register(JNIEnv *env)
 			"nativeSendControllerState",
 			"(IIIIIIIIIIIII)I",
 			(void *)deckstation_native_send_controller_state,
+		},
+		{
+			"nativeSendControllerStateForPad",
+			"(IIIIIIIIIIIIII)I",
+			(void *)deckstation_native_send_controller_state_for_pad,
+		},
+		{
+			"nativeSetPlayerPadActive",
+			"(IZLjava/lang/String;)I",
+			(void *)deckstation_native_set_player_pad_active,
 		},
 		{
 			"nativeSetCloudControllerVariant",
