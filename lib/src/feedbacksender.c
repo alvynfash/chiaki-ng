@@ -108,9 +108,6 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_feedback_sender_set_controller_state_for_pa
 		feedback_sender->controller_state_changed[controller_id] = true;
 	}
 
-	CHIAKI_LOGI(feedback_sender->log, "FeedbackSender: controller state changed, buttons=0x%llx l2=%u r2=%u lx=%d ly=%d",
-		(unsigned long long)state->buttons, state->l2_state, state->r2_state, state->left_x, state->left_y);
-
 	chiaki_mutex_unlock(&feedback_sender->state_mutex);
 	chiaki_cond_signal(&feedback_sender->state_cond);
 

@@ -1013,14 +1013,8 @@ static ChiakiErrorCode takion_send_feedback_packet(ChiakiTakion *takion, uint8_t
 		cloud_buf[TAKION_CLOUD_PREFIX_SIZE] = buf[0];
 		memcpy(cloud_buf + TAKION_CLOUD_PREFIX_SIZE + 1, buf + 1, buf_size - 1);
 
-		if(takion->log)
-		{
-			char hex[256] = {0};
-			size_t log_len = cloud_size < 40 ? cloud_size : 40;
-			for(size_t i = 0; i < log_len; i++)
-				snprintf(hex + i*3, sizeof(hex) - i*3, "%02x ", cloud_buf[i]);
-			CHIAKI_LOGI(takion->log, "Takion feedback_pkt wire [%zu bytes]: %s", cloud_size, hex);
-		}
+		if(takion->log && (takion->log->level_mask & CHIAKI_LOG_DEBUG))
+			CHIAKI_LOGD(takion->log, "Takion cloud feedback packet: %zu bytes", cloud_size);
 
 		err = chiaki_takion_send_raw(takion, cloud_buf, cloud_size);
 		free(cloud_buf);

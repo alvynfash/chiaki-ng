@@ -660,16 +660,14 @@ static jint deckstation_native_send_controller_state(
 	return err;
 }
 
-static jint deckstation_native_send_controller_state_for_pad(
-	JNIEnv *env, jobject bridge, jint controller_id,
-	 jint buttons, jint l2_state, jint r2_state,
-	 jint left_x, jint left_y, jint right_x, jint right_y,
-	 jint touch0_id, jint touch0_x, jint touch0_y,
-	 jint touch1_id, jint touch1_x, jint touch1_y)
+int32_t deckstation_android_runtime_send_controller_state_for_pad(
+    uint8_t controller_id,
+    int32_t buttons, int32_t l2_state, int32_t r2_state,
+    int32_t left_x, int32_t left_y, int32_t right_x, int32_t right_y,
+    int32_t touch0_id, int32_t touch0_x, int32_t touch0_y,
+    int32_t touch1_id, int32_t touch1_x, int32_t touch1_y)
 {
-	(void)env;
-	(void)bridge;
-	if(controller_id < 0 || controller_id >= 4)
+	if(controller_id >= 4)
 		return CHIAKI_ERR_INVALID_DATA;
 	ChiakiControllerState state;
 	chiaki_controller_state_set_idle(&state);
@@ -696,15 +694,28 @@ static jint deckstation_native_send_controller_state_for_pad(
 	return err;
 }
 
-static jint deckstation_native_set_player_pad_active(
-	JNIEnv *env, jobject bridge, jint controller_id, jboolean active_value,
-	jstring name_value)
+static jint deckstation_native_send_controller_state_for_pad(
+    JNIEnv *env, jobject bridge, jint controller_id,
+    jint buttons, jint l2_state, jint r2_state,
+    jint left_x, jint left_y, jint right_x, jint right_y,
+    jint touch0_id, jint touch0_x, jint touch0_y,
+    jint touch1_id, jint touch1_x, jint touch1_y)
 {
+	(void)env;
 	(void)bridge;
+	if(controller_id < 0 || controller_id >= 4)
+		return CHIAKI_ERR_INVALID_DATA;
+	return deckstation_android_runtime_send_controller_state_for_pad(
+		(uint8_t)controller_id, buttons, l2_state, r2_state,
+		left_x, left_y, right_x, right_y,
+		touch0_id, touch0_x, touch0_y, touch1_id, touch1_x, touch1_y);
+}
+
+int32_t deckstation_android_runtime_set_player_pad_active(
+    uint8_t controller_id, uint8_t active_value, const char *name)
+{
 	if(controller_id < 1 || controller_id >= 4)
 		return CHIAKI_ERR_INVALID_DATA;
-	const char *name = name_value
-		? (*env)->GetStringUTFChars(env, name_value, NULL) : NULL;
 	pthread_mutex_lock(&g_session_mutex);
 	DeckStationAndroidSession *session = g_session;
 	ChiakiErrorCode err = CHIAKI_ERR_UNINITIALIZED;
@@ -714,7 +725,7 @@ static jint deckstation_native_set_player_pad_active(
 			err = CHIAKI_ERR_INVALID_DATA;
 		else
 		{
-			const bool active = active_value == JNI_TRUE;
+			const bool active = active_value != 0;
 			const uint8_t bit = (uint8_t)(1U << controller_id);
 			if(chiaki_mutex_lock(&session->session.state_mutex) != CHIAKI_ERR_SUCCESS)
 				err = CHIAKI_ERR_UNKNOWN;
@@ -745,9 +756,25 @@ static jint deckstation_native_set_player_pad_active(
 		}
 	}
 	pthread_mutex_unlock(&g_session_mutex);
+	return err;
+}
+
+static jint deckstation_native_set_player_pad_active(
+    JNIEnv *env, jobject bridge, jint controller_id, jboolean active_value,
+    jstring name_value)
+{
+	(void)bridge;
+	if(controller_id < 1 || controller_id >= 4)
+		return CHIAKI_ERR_INVALID_DATA;
+	const char *name = name_value
+		? (*env)->GetStringUTFChars(env, name_value, NULL) : NULL;
+	if(name_value && !name)
+		return CHIAKI_ERR_MEMORY;
+	const int32_t result = deckstation_android_runtime_set_player_pad_active(
+		(uint8_t)controller_id, active_value == JNI_TRUE ? 1 : 0, name);
 	if(name)
 		(*env)->ReleaseStringUTFChars(env, name_value, name);
-	return err;
+	return result;
 }
 
 static jstring deckstation_native_set_cloud_controller_variant(
