@@ -215,14 +215,15 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 		&& strcmp(scope, "psnow") != 0 && strcmp(scope, "all") != 0)
 		scope = "all";
 	const bool owned_scope = strcmp(scope, "owned") == 0;
-	// The Owned UI is PS5-only. It needs Imagic metadata plus the account's
-	// entitlements, but not the APOLLOROOT/PS Now category walk used by the
-	// complete catalog.
-	const bool include_apollo = strcmp(scope, "psplus") != 0 && !owned_scope;
+	// Owned PS4 titles need Apollo metadata as well as the PS5 Imagic browse
+	// universe and account entitlements. The final owned projection keeps the
+	// FFI result small after both sources have been merged.
+	const bool include_apollo = strcmp(scope, "psplus") != 0;
 	const bool include_imagic = strcmp(scope, "psnow") != 0;
 	const bool include_owned = strcmp(scope, "all") == 0 || owned_scope;
 	char unified_cache_key[64];
-	snprintf(unified_cache_key, sizeof(unified_cache_key), "unified_catalog_%s_v1", scope);
+	snprintf(unified_cache_key, sizeof(unified_cache_key), "unified_catalog_%s_v%s", scope,
+		owned_scope ? "2" : "1");
 
 	cc_cache_ensure_dir(cache_dir);
 
@@ -233,8 +234,8 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 	{
 		const char *cache_hit_key = unified_cache_key;
 		struct json_object *cached = cc_cache_read(log, cache_dir, cache_hit_key, CC_CACHE_TTL_MS);
-		// Older builds stored Owned as a projection of the complete `all` cache.
-		// Reuse that snapshot so upgrading does not force another network request.
+		// An All snapshot contains the Apollo PS4 rows needed by Owned. Reuse
+		// it on upgrade, while bypassing stale PS5-only Owned snapshots.
 		if(!cached && owned_scope)
 		{
 			cache_hit_key = "unified_catalog_all_v1";
@@ -543,7 +544,7 @@ CHIAKI_EXPORT ChiakiErrorCode chiaki_cloudcatalog_fetch_unified(
 			if(owned_env)
 			{
 				project_result_scope(owned_env, "owned");
-				cc_cache_write(log, cache_dir, "unified_catalog_owned_v1", owned_env);
+				cc_cache_write(log, cache_dir, "unified_catalog_owned_v2", owned_env);
 				json_object_put(owned_env);
 			}
 		}
@@ -580,7 +581,7 @@ CHIAKI_EXPORT void chiaki_cloudcatalog_invalidate_cache(const char *cache_dir)
 	// Current keys + legacy keys, so invalidation also purges caches written by
 	// older builds (e.g. the pre-contract unified_catalog_v2).
 	static const char *const keys[] = {
-		"unified_catalog_all_v1", "unified_catalog_owned_v1",
+		"unified_catalog_all_v1", "unified_catalog_owned_v1", "unified_catalog_owned_v2",
 		"unified_catalog_psplus_v1", "unified_catalog_psnow_v1",
 		"unified_catalog_v3", "ps5_cloud_catalog_v6", "ps5_cloud_library",
 		"psnow_catalog",
